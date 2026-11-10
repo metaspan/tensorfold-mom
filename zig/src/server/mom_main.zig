@@ -75,6 +75,7 @@ pub const Parsed = struct {
     specs: []Spec,
     rest: []const []const u8,
     mom_log: ?[]const u8 = null,
+    no_sticky: bool = false,
 };
 
 /// Extracts the repeated --model/--name/--lane/--pin groups. --model starts a group; --name is
@@ -96,9 +97,14 @@ pub fn parseSpecs(a: std.mem.Allocator, argv: []const []const u8, problem: *[]co
         }
     }.one;
     var mom_log: ?[]const u8 = null;
+    var no_sticky = false;
     var i: usize = 0;
     while (i < argv.len) : (i += 1) {
         const arg = argv[i];
+        if (std.mem.eql(u8, arg, "--no-sticky")) {
+            no_sticky = true;
+            continue;
+        }
         if (std.mem.eql(u8, arg, "--mom-log")) {
             if (i + 1 >= argv.len) {
                 problem.* = "mom-serve: --mom-log wants a file path";
@@ -166,7 +172,7 @@ pub fn parseSpecs(a: std.mem.Allocator, argv: []const []const u8, problem: *[]co
             return null;
         }
     };
-    return .{ .specs = specs.items, .rest = rest.items, .mom_log = mom_log };
+    return .{ .specs = specs.items, .rest = rest.items, .mom_log = mom_log, .no_sticky = no_sticky };
 }
 
 /// A refusal for flags the mom path has no per-model story for yet (B3-B5): the message says which stage brings them.
@@ -402,7 +408,7 @@ pub fn run(init: std.process.Init, argv: []const []const u8) !u8 {
         reg_ptr.* = .{
             .lanes = lanes,
             .router = .{
-                .cfg = .{ .lanes = router_lanes, .sticky_enabled = true, .sticky_capacity = 4096 },
+                .cfg = .{ .lanes = router_lanes, .sticky_enabled = !parsed.no_sticky, .sticky_capacity = 4096 },
                 .sticky = try mom_router.Sticky.init(a, 4096),
             },
             .log_file = sticky_log,
