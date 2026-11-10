@@ -92,6 +92,7 @@ pub fn models(srv: *Server, conn: *Conn, a: Allocator) !void {
             const mo = try json.newObject(a);
             try mo.put(a, "decisions", try json.intValue(a, m.decisionCount(li)));
             try mo.put(a, "role", .{ .string = m.laneRoleName(li) });
+            if (m.hasIdlePolicy(li)) try mo.put(a, "state", .{ .string = m.laneStateName(li) });
             try slot.*.object.put(a, "mom", .{ .object = mo });
         }
     };

@@ -260,7 +260,7 @@ pub fn generate(srv: *Server, cx: *Cx, prepared: Prepared, sink: ?Sink, gone: an
     // whatever way the turn ends, so a park never closes an engine mid-request.
     const mom_release = srv.mom != null and input.mom_leased;
     defer if (mom_release) srv.mom.?.releaseLane(input.mom_lane);
-    const lane_engine: api.Engine = if (srv.mom) |m| m.lanes[input.mom_lane].engine else srv.engine;
+    const lane_engine: api.Engine = if (srv.mom) |m| (m.lanes[input.mom_lane].engine orelse return cx.refuse("this lane is asleep; retry")) else srv.engine;
     lane_engine.submit(id, &request, .{ .ctx = &box, .event = Mailbox.onEvent }) catch |e| return switch (e) {
         error.Busy => cx.wait(wait.engine_busy, "the engine is busy; retry shortly", .{}),
         error.Closed => cx.wait(wait.engine_unavailable, "the engine is unavailable; retry after it restarts", .{}),

@@ -24,7 +24,9 @@ const mom_sleep = @import("mom_sleep.zig");
 
 pub const Lane = struct {
     id: []const u8,
-    engine: api.Engine,
+    /// Null only while the lane is parked (sleep/wake): route wakes before any
+    /// submit, so readers meet it resident; the refuse below is the belt.
+    engine: ?api.Engine,
     info: api.Info,
 };
 
@@ -103,6 +105,22 @@ pub const Registry = struct {
     /// The request's engine-using window ends (any outcome).
     pub fn releaseLane(self: *Registry, lane: usize) void {
         if (self.lifecycle(lane)) |lc| lc.release(self.nowNsPriv());
+    }
+
+    /// "resident" or "asleep" for /v1/models; lanes without an idle policy read resident.
+    pub fn laneStateName(self: *Registry, li: usize) []const u8 {
+        if (li >= self.lifecycles.len or self.lifecycles[li].idle_ns == 0) return "resident";
+        const lc = &self.lifecycles[li];
+        lc.lock();
+        defer lc.unlock();
+        return switch (lc.state) {
+            .resident, .unloading => "resident", // an in-flight park can still be cancelled by a lease
+            .unloaded, .loading => "asleep",
+        };
+    }
+
+    pub fn hasIdlePolicy(self: *Registry, li: usize) bool {
+        return li < self.lifecycles.len and self.lifecycles[li].idle_ns > 0;
     }
 
     pub fn laneRoleName(self: *const Registry, li: usize) []const u8 {

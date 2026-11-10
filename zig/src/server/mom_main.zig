@@ -19,9 +19,83 @@ const api = @import("engine_api");
 const mom_plan = @import("mom_plan.zig");
 const mom_router = @import("mom_router.zig");
 const mom_registry = @import("mom_registry.zig");
+const mom_sleep = @import("mom_sleep.zig");
 const tool_id_key = @import("tool_id_key.zig");
 
 const max_models = 8;
+
+/// A resolved checkpoint: its folder, family, and weight bytes (file scope so the
+/// sleep/wake Reopen closure can carry the open recipe; mom_main.run fills it).
+const Held = struct {
+    spec: Spec,
+    dir: []const u8,
+    model_type: []const u8,
+    weights: u64,
+};
+
+/// Stable state behind sleep/wake (docs/08): everything needed to reopen any lane.
+/// `opened` points at run()'s slot array (stable: serve.run blocks in the same frame).
+const SleepCtx = struct {
+    held: []const Held,
+    lanes: []mom_registry.Lane,
+    opened: []?api.Opened,
+    args: cli.Args,
+    a: std.mem.Allocator,
+    gpa: std.mem.Allocator,
+};
+
+const OpenError = error{ OpenFailed, OutOfMemory };
+
+fn reopenLane(p: *anyopaque, a: std.mem.Allocator, io: std.Io, lane: usize) anyerror!void {
+    const t: *SleepCtx = @ptrCast(@alignCast(p));
+    var problem: []const u8 = "";
+    const h = t.held[lane];
+    const entry0: i64 = @intCast(@import("clock.zig").nowNs(io));
+    const got = (engines.open(a, t.gpa, io, h.dir, h.model_type, t.args, &problem) catch |e| {
+        log.line("mom: wake {s} open failed: {s}", .{ h.spec.name, @errorName(e) });
+        return e;
+    }) orelse {
+        log.line("mom: wake {s} refused: {s}", .{ h.spec.name, if (problem.len > 0) problem else "the backend refused it" });
+        return error.OpenFailed;
+    };
+    const slot = &t.opened[lane]; // the timer closed it; this is the belt to a stale slot
+    if (slot.*) |o| {
+        o.close(o.ctx);
+        slot.* = null;
+    }
+    slot.* = got;
+    t.lanes[lane].engine = got.engine;
+    t.lanes[lane].info = got.engine.info();
+    const ms = @divTrunc(@as(i64, @intCast(@import("clock.zig").nowNs(io))) - entry0, std.time.ns_per_ms);
+    log.line("mom: woke {s} in {d} ms", .{ h.spec.name, ms });
+}
+
+/// One shared timer thread: parks idle lanes (non-trivial only: their idle_ns is 0).
+const Sleeper = struct {
+    reg: *mom_registry.Registry,
+    ctx: *SleepCtx,
+    io: std.Io,
+
+    fn run(self: *Sleeper) void {
+        while (true) {
+            std.Io.sleep(self.io, .fromMilliseconds(1000), .awake) catch {};
+            for (self.reg.lifecycles, 0..) |*lc, i| {
+                if (lc.idle_ns == 0) continue;
+                const now: i64 = @intCast(@import("clock.zig").nowNs(self.io));
+                if (!lc.shouldSleep(now)) continue;
+                if (!lc.claimUnload()) continue; // a lease (or a state move) saved it
+                const oslot = &self.ctx.opened[i];
+                if (oslot.*) |o| {
+                    o.close(o.ctx);
+                    oslot.* = null;
+                }
+                self.ctx.lanes[i].engine = null; // readers meet it resident (route wakes); submit's refuse is the belt
+                lc.finishUnload();
+                log.line("mom: {s} asleep (idle)", .{self.ctx.held[i].spec.name});
+            }
+        }
+    }
+};
 
 /// One `--model DIR --name NAME [--lane NAME] [--pin]` group, in command order (the first is the default).
 const Spec = struct {
@@ -76,6 +150,7 @@ pub const Parsed = struct {
     rest: []const []const u8,
     mom_log: ?[]const u8 = null,
     no_sticky: bool = false,
+    lane_idle_s: i64 = 0,
 };
 
 /// Extracts the repeated --model/--name/--lane/--pin groups. --model starts a group; --name is
@@ -98,9 +173,27 @@ pub fn parseSpecs(a: std.mem.Allocator, argv: []const []const u8, problem: *[]co
     }.one;
     var mom_log: ?[]const u8 = null;
     var no_sticky = false;
+    var lane_idle: i64 = 0;
     var i: usize = 0;
     while (i < argv.len) : (i += 1) {
         const arg = argv[i];
+        if (std.mem.eql(u8, arg, "--lane-idle")) {
+            if (i + 1 >= argv.len) {
+                problem.* = "mom-serve: --lane-idle wants a seconds count";
+                return null;
+            }
+            const secs = std.fmt.parseInt(i64, argv[i + 1], 10) catch {
+                problem.* = "mom-serve: --lane-idle wants a non-negative integer";
+                return null;
+            };
+            if (secs < 0) {
+                problem.* = "mom-serve: --lane-idle wants a non-negative integer";
+                return null;
+            }
+            lane_idle = secs;
+            i += 1;
+            continue;
+        }
         if (std.mem.eql(u8, arg, "--no-sticky")) {
             no_sticky = true;
             continue;
@@ -172,7 +265,7 @@ pub fn parseSpecs(a: std.mem.Allocator, argv: []const []const u8, problem: *[]co
             return null;
         }
     };
-    return .{ .specs = specs.items, .rest = rest.items, .mom_log = mom_log, .no_sticky = no_sticky };
+    return .{ .specs = specs.items, .rest = rest.items, .mom_log = mom_log, .no_sticky = no_sticky, .lane_idle_s = lane_idle };
 }
 
 /// A refusal for flags the mom path has no per-model story for yet (B3-B5): the message says which stage brings them.
@@ -268,12 +361,6 @@ pub fn run(init: std.process.Init, argv: []const []const u8) !u8 {
     receipt.enable(io, entry, try @import("sys").environment.read(bool, "TF_STARTUP_RECEIPT", false));
     defer receipt.disable();
     // 1. resolve, type and hold every checkpoint before any open: a bad folder refuses with nothing loaded
-    const Held = struct {
-        spec: Spec,
-        dir: []const u8,
-        model_type: []const u8,
-        weights: u64,
-    };
     var held: [max_models]Held = undefined;
     for (parsed.specs, 0..) |spec, i| {
         const dir = (try hub.resolve(a, io, init.environ_map, spec.model, &problem)) orelse {
@@ -376,6 +463,7 @@ pub fn run(init: std.process.Init, argv: []const []const u8) !u8 {
     const engine = opened[0].?;
     // B2: the routing registry — every opened engine is a lane; roles come from --lane
     // with a deterministic fallback (largest weights = default, smallest = trivial).
+    var sleep_ctx: ?*SleepCtx = null; // lives past the registry block: the timer thread needs it
     const reg = blk: {
         const router_lanes = try a.alloc(mom_router.Lane, parsed.specs.len);
         for (parsed.specs, 0..) |sp, i| router_lanes[i] = .{ .id = sp.name, .role = .other };
@@ -402,6 +490,26 @@ pub fn run(init: std.process.Init, argv: []const []const u8) !u8 {
         }
         const lanes = try a.alloc(mom_registry.Lane, parsed.specs.len);
         for (opened[0..parsed.specs.len], 0..) |o, i| lanes[i] = .{ .id = parsed.specs[i].name, .engine = o.?.engine, .info = o.?.engine.info() };
+        // Sleep/wake (docs/08): non-trivial lanes may park after idle; the trivial lane is
+        // permanently hot by policy (idle_ns 0 -> every lifecycle hook is an inert no-op).
+        var lifecycles: []mom_sleep.LaneLifecycle = &.{};
+        if (parsed.lane_idle_s > 0 and parsed.specs.len > 1) {
+            lifecycles = try a.alloc(mom_sleep.LaneLifecycle, parsed.specs.len);
+            for (router_lanes, lifecycles) |rl, *lc| lc.* = .{
+                .io = io,
+                .idle_ns = if (rl.role == .trivial) 0 else parsed.lane_idle_s * std.time.ns_per_s,
+            };
+            const sc = try a.create(SleepCtx);
+            sc.* = .{
+                .held = try a.dupe(Held, held[0..parsed.specs.len]),
+                .lanes = lanes,
+                .opened = opened[0..parsed.specs.len],
+                .args = args,
+                .a = a,
+                .gpa = gpa,
+            };
+            sleep_ctx = sc;
+        }
         var sticky_log: ?std.Io.File = null;
         if (parsed.mom_log) |path| sticky_log = openDecisionLog(io, path) catch null;
         const reg_ptr = try a.create(mom_registry.Registry);
@@ -413,12 +521,21 @@ pub fn run(init: std.process.Init, argv: []const []const u8) !u8 {
             },
             .log_file = sticky_log,
             .io = io,
+            .lifecycles = lifecycles,
+            .reopen = if (sleep_ctx) |sc| mom_registry.Reopen{ .ctx = @ptrCast(sc), .call = reopenLane } else null,
         };
         log.line("mom: routing over {d} lane{s} (default={s}, trivial={s})", .{ lanes.len, if (lanes.len == 1) "" else "s", laneId(router_lanes, .default_lane), laneId(router_lanes, .trivial) });
         break :blk reg_ptr;
     };
     const text = default_text.?;
     // 4. serve on the default model, every id advertised: the extra ids join as aliases until B2 routes them
+    if (sleep_ctx) |sc| { // arm the park timer once the registry can see every lane
+        const sl = try a.create(Sleeper);
+        sl.* = .{ .reg = reg, .ctx = sc, .io = io };
+        const th = try std.Thread.spawn(.{}, Sleeper.run, .{sl});
+        th.detach();
+        log.line("mom: sleep/wake armed: non-trivial lanes park after {d}s idle", .{parsed.lane_idle_s});
+    }
     const served = hub.servedName(args.name, args.model, held[0].dir);
     var tool_ids = tool_id_key.load(a, init.environ_map.get(tool_id_key.name), &problem) catch |e| switch (e) {
         error.OutOfMemory => |x| return x,
