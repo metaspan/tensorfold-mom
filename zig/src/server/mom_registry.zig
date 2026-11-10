@@ -20,6 +20,7 @@ const std = @import("std");
 const json = @import("json");
 const api = @import("engine_api");
 const mom_router = @import("mom_router.zig");
+const mom_sleep = @import("mom_sleep.zig");
 
 pub const Lane = struct {
     id: []const u8,
@@ -28,6 +29,13 @@ pub const Lane = struct {
 };
 
 pub const Decision = struct { lane: usize, reason: []const u8 };
+
+/// Reopens a sleeping lane's engine and swaps it into `lanes[lane].engine`
+/// (mom_main owns the checkpoint args and the held slot the shutdown path reads).
+pub const Reopen = struct {
+    ctx: *anyopaque,
+    call: *const fn (ctx: *anyopaque, a: std.mem.Allocator, io: std.Io, lane: usize) anyerror!void,
+};
 
 pub const Registry = struct {
     lanes: []const Lane,
@@ -39,6 +47,63 @@ pub const Registry = struct {
     /// reports them per advertised id. Capped by the router's lane limit.
     decision_counts: [16]u32 = @splat(0),
     decision_total: u64 = 0,
+    /// Sleep/wake (docs/08): one lifecycle per lane; `idle_ns == 0` lanes are inert
+    /// no-ops, so the default (sleep disabled) path pays only a bounds check.
+    lifecycles: []mom_sleep.LaneLifecycle = &.{},
+    reopen: ?Reopen = null,
+    wake_failures: u32 = 0,
+
+    fn lifecycle(self: *Registry, lane: usize) ?*mom_sleep.LaneLifecycle {
+        if (lane >= self.lifecycles.len) return null;
+        if (self.lifecycles[lane].idle_ns == 0) return null;
+        return &self.lifecycles[lane];
+    }
+
+    fn nowNsPriv(self: *Registry) i64 {
+        return @as(i64, @intCast(@import("clock.zig").nowNs(self.io)));
+    }
+
+    /// Route-time hook: wake the lane if it is asleep (the caller parks until the
+    /// engine is back — open is the startup path), then take the request's lease.
+    /// The paired release is `releaseLane`, deferred from chat's submit scope;
+    /// `Input.mom_leased` records that this request holds one.
+    pub fn noteRoute(self: *Registry, a: std.mem.Allocator, lane: usize) bool {
+        const lc = self.lifecycle(lane) orelse return false;
+        while (true) {
+            lc.lock();
+            const st = lc.state;
+            lc.unlock();
+            switch (st) {
+                .resident, .unloading => break, // unloading: lease() below cancels the park
+                .loading => {
+                    lc.lock();
+                    while (lc.state == .loading) lc.cond.waitUncancelable(self.io, &lc.mutex);
+                    lc.unlock();
+                },
+                .unloaded => {
+                    if (!lc.claimWake()) continue; // another waker won; loop to wait
+                    const rr = self.reopen orelse {
+                        lc.wakeFailed();
+                        return false;
+                    };
+                    rr.call(rr.ctx, a, self.io, lane) catch {
+                        self.wake_failures += 1;
+                        lc.wakeFailed();
+                        return false;
+                    };
+                    lc.finishWake(self.nowNsPriv());
+                    break;
+                },
+            }
+        }
+        lc.lease(self.nowNsPriv());
+        return true;
+    }
+
+    /// The request's engine-using window ends (any outcome).
+    pub fn releaseLane(self: *Registry, lane: usize) void {
+        if (self.lifecycle(lane)) |lc| lc.release(self.nowNsPriv());
+    }
 
     pub fn laneRoleName(self: *const Registry, li: usize) []const u8 {
         const role: mom_router.Role = if (li < self.router.cfg.lanes.len) self.router.cfg.lanes[li].role else .other;
@@ -204,6 +269,63 @@ test "registry: route counts decisions per lane" {
     try std.testing.expectEqual(@as(u64, 3), reg.decision_total);
     try std.testing.expectEqualStrings("trivial", reg.laneRoleName(0));
     try std.testing.expectEqualStrings("default", reg.laneRoleName(1));
+}
+
+test "registry: wake-on-route reopens an asleep lane and leases it" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const Ctx = struct { opens: usize = 0, fail: bool = false };
+    var ctx = Ctx{};
+    var lifes = try a.alloc(mom_sleep.LaneLifecycle, 2);
+    lifes[0] = .{ .io = std.testing.io, .idle_ns = 0 }; // trivial lane: inert
+    lifes[1] = .{ .io = std.testing.io, .idle_ns = std.time.ns_per_s };
+    const lane_defs = [_]mom_router.Lane{
+        .{ .id = "small", .role = .trivial },
+        .{ .id = "big", .role = .default_lane },
+    };
+    var reg: Registry = .{
+        .lanes = &.{},
+        .router = .{
+            .cfg = .{ .lanes = &lane_defs, .sticky_enabled = false },
+            .sticky = try mom_router.Sticky.init(a, 8),
+        },
+        .io = std.testing.io,
+        .lifecycles = lifes,
+        .reopen = .{ .ctx = @ptrCast(&ctx), .call = struct {
+            fn f(c: *anyopaque, al: std.mem.Allocator, io: std.Io, lane: usize) anyerror!void {
+                _ = al; _ = io; _ = lane;
+                const t: *Ctx = @ptrCast(@alignCast(c));
+                if (t.fail) return error.OutOfMemory;
+                t.opens += 1;
+            }
+        }.f },
+    };
+    // Inert lane: noteRoute does nothing, reports no lease.
+    try std.testing.expect(!reg.noteRoute(a, 0));
+    // Asleep heavy lane: wake via reopen, lease taken, then released.
+    lifes[1].last_used_ns = 0;
+    try std.testing.expect(lifes[1].claimUnload());
+    lifes[1].finishUnload();
+    try std.testing.expect(reg.noteRoute(a, 1));
+    try std.testing.expectEqual(@as(usize, 1), ctx.opens);
+    try std.testing.expectEqual(@as(u32, 1), lifes[1].active);
+    try std.testing.expectEqual(State_in_test(&lifes[1]), mom_sleep.State.resident);
+    reg.releaseLane(1);
+    try std.testing.expectEqual(@as(u32, 0), lifes[1].active);
+    // Failed wake leaves the lane retryable and counts the failure.
+    ctx.fail = true;
+    try std.testing.expect(lifes[1].claimUnload());
+    lifes[1].finishUnload();
+    try std.testing.expect(!reg.noteRoute(a, 1));
+    try std.testing.expectEqual(@as(u32, 1), reg.wake_failures);
+    try std.testing.expectEqual(mom_sleep.State.unloaded, lifes[1].state);
+}
+
+fn State_in_test(lc: *mom_sleep.LaneLifecycle) mom_sleep.State {
+    lc.lock();
+    defer lc.unlock();
+    return lc.state;
 }
 
 test "registry: convKey is stable as the conversation grows" {

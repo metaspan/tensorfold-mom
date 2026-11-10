@@ -45,6 +45,9 @@ pub const Input = struct {
     format: ?[]const u8 = null,
     /// MoM: the registry lane the request was routed to (set by openai.plan); 0 without a registry.
     mom_lane: usize = 0,
+    /// True when route() leased this request's lane (sleep/wake): the submit scope
+    /// defers the matching releaseLane. False = no lifecycle involved (all N=1 paths).
+    mom_leased: bool = false,
 };
 
 /// A streamed piece: content text (a string) or a delta object (reasoning or tool calls).
@@ -253,6 +256,10 @@ pub fn generate(srv: *Server, cx: *Cx, prepared: Prepared, sink: ?Sink, gone: an
     const id = srv.next_id.fetchAdd(1, .monotonic);
     if (srv.keepalive) |k| k.begin(); // the GPU is busy: the idle ticker holds its commits
     defer if (srv.keepalive) |k| k.end();
+    // Sleep/wake lease: the route took it (wake + active++); this scope returns it
+    // whatever way the turn ends, so a park never closes an engine mid-request.
+    const mom_release = srv.mom != null and input.mom_leased;
+    defer if (mom_release) srv.mom.?.releaseLane(input.mom_lane);
     const lane_engine: api.Engine = if (srv.mom) |m| m.lanes[input.mom_lane].engine else srv.engine;
     lane_engine.submit(id, &request, .{ .ctx = &box, .event = Mailbox.onEvent }) catch |e| return switch (e) {
         error.Busy => cx.wait(wait.engine_busy, "the engine is busy; retry shortly", .{}),

@@ -201,6 +201,7 @@ pub fn plan(srv: *Server, cx: *Cx, is_chat: bool, raw: Value, format: ?[]const u
             error.OutOfMemory => return error.OutOfMemory,
         };
         plan_result.input.mom_lane = d.lane;
+        plan_result.input.mom_leased = m.noteRoute(cx.a, d.lane);
         plan_result.named = m.lanes[d.lane].id;
     }
     return plan_result;
