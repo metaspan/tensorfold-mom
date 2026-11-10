@@ -17,6 +17,7 @@ pub const mom_plan = @import("mom_plan.zig");
 pub const mom_main = @import("mom_main.zig");
 pub const mom_router = @import("mom_router.zig");
 pub const mom_registry = @import("mom_registry.zig");
+pub const mom_sleep = @import("mom_sleep.zig");
 pub const Server = server.Server;
 pub const Config = server.Config;
 
@@ -26,6 +27,7 @@ test {
     _ = @import("mom_main.zig");
     _ = @import("mom_router.zig");
     _ = @import("mom_registry.zig");
+    _ = @import("mom_sleep.zig");
     _ = @import("kimi_prompt_test.zig");
     _ = @import("kimi_text_test.zig");
     _ = @import("kimi_reply_test.zig");
