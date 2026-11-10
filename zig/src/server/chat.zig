@@ -43,6 +43,8 @@ pub const Input = struct {
     prompt_logprobs: ?u8 = null,
     /// The client's own name for the grammar field (text.format, output_config.format); null on chat and completions.
     format: ?[]const u8 = null,
+    /// MoM: the registry lane the request was routed to (set by openai.plan); 0 without a registry.
+    mom_lane: usize = 0,
 };
 
 /// A streamed piece: content text (a string) or a delta object (reasoning or tool calls).
@@ -237,8 +239,13 @@ pub fn generate(srv: *Server, cx: *Cx, prepared: Prepared, sink: ?Sink, gone: an
         }
     }
     if (gone.check()) return error.Cancelled;
-    if (!srv.info.capability(.text_generation)) return cx.refuse("this model does not support text generation");
-    if (srv.info.capability(.decides)) return cx.refuse("this model makes decisions and does not write text: use POST /v1/systemone");
+    // MoM: the routed lane's engine and its own capabilities decide; without a registry
+    // these read exactly what the pre-fork code read (N=1 parity). The child engine still
+    // revalidates the request against its own window at submit, so a lane too small for
+    // the prompt refuses cleanly (InvalidRequest) instead of running corrupted state.
+    const lane_info: api.Info = if (srv.mom) |m| m.lanes[input.mom_lane].info else srv.info;
+    if (!lane_info.capability(.text_generation)) return cx.refuse("this model does not support text generation");
+    if (lane_info.capability(.decides)) return cx.refuse("this model makes decisions and does not write text: use POST /v1/systemone");
     var stop_hook: StopHook = .{ .srv = srv, .stops = .{ .strings = stops_opt.strings } };
     if (stops_opt.strings.len > 0) request.stop = .{ .ctx = &stop_hook, .check = StopHook.check };
     var box: Mailbox = .{ .io = io, .gpa = srv.gpa };
@@ -246,7 +253,8 @@ pub fn generate(srv: *Server, cx: *Cx, prepared: Prepared, sink: ?Sink, gone: an
     const id = srv.next_id.fetchAdd(1, .monotonic);
     if (srv.keepalive) |k| k.begin(); // the GPU is busy: the idle ticker holds its commits
     defer if (srv.keepalive) |k| k.end();
-    srv.engine.submit(id, &request, .{ .ctx = &box, .event = Mailbox.onEvent }) catch |e| return switch (e) {
+    const lane_engine: api.Engine = if (srv.mom) |m| m.lanes[input.mom_lane].engine else srv.engine;
+    lane_engine.submit(id, &request, .{ .ctx = &box, .event = Mailbox.onEvent }) catch |e| return switch (e) {
         error.Busy => cx.wait(wait.engine_busy, "the engine is busy; retry shortly", .{}),
         error.Closed => cx.wait(wait.engine_unavailable, "the engine is unavailable; retry after it restarts", .{}),
         error.InvalidSpans => cx.fail(.request, "the prompt span layout is invalid", .{}),

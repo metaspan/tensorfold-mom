@@ -9,6 +9,7 @@ pub const completion = @import("completion.zig");
 pub const paging_test_device = if (@import("builtin").is_test) @import("paging_test_device.zig") else struct {};
 pub const Error = @import("driver.zig").Error;
 pub const Context = @import("context.zig").Context;
+pub const context_owner = @import("context_owner.zig");
 pub const DeviceBuffer = @import("memory.zig").DeviceBuffer;
 pub const HostBuffer = @import("memory.zig").HostBuffer;
 pub const memory = @import("memory.zig");

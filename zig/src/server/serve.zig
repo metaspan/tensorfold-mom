@@ -9,6 +9,7 @@ const log = @import("log.zig");
 const live = @import("live.zig");
 const listener_mod = @import("listener.zig");
 const model_text = @import("model_text.zig");
+const mom_registry = @import("mom_registry.zig");
 const server_mod = @import("server.zig");
 const idle_unload = @import("idle_unload.zig");
 const hf_text = @import("hf_text.zig");
@@ -96,6 +97,8 @@ pub const Setup = struct {
     started: i96 = 0,
     /// The release, backend and GPU the open /health names.
     identity: server_mod.Identity = .{},
+    /// MoM lanes for mom-serve; null for every ordinary serve, which keeps Server.mom null.
+    mom: ?*mom_registry.Registry = null,
     /// A test build's TF_SLIDE_FORGET_FAIL: the fact whose check a delete fails (0: none, as in every release).
     forget_fail: u32 = 0,
     /// Called once the socket listens, with its port (tests read it).
@@ -236,6 +239,7 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
     defer srv.deinit();
     srv.load.attach(srv.engine);
     srv.recall = s.recall;
+    srv.mom = s.mom; // MoM lanes (mom-serve only); null keeps every touched site on its pre-fork path
     switch (idle_unload.startServer(srv, args, s.reopen, s.model_dir, s.model_type)) {
         .disabled, .enabled => {},
         .no_reopen => log.line("idle unload off: this server has no reopen path", .{}),

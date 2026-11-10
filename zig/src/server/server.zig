@@ -10,6 +10,7 @@ const scope = @import("auth_scope.zig");
 const request_guard = @import("request_guard.zig");
 const metrics = @import("metrics.zig");
 const model_text = @import("model_text.zig");
+const mom_registry = @import("mom_registry.zig");
 const reply_text = @import("reply_text.zig");
 const http_conn = @import("http_conn.zig");
 const listener_mod = @import("listener.zig");
@@ -137,6 +138,9 @@ pub const Server = struct {
     info: api.Info,
     text: model_text.Text,
     config: Config,
+    /// Mixture-of-Models lanes; null on every ordinary single-model server, which keeps
+    /// each touched site on its original code path (the N=1 parity rule of the fork).
+    mom: ?*mom_registry.Registry = null,
     voices: []const @import("drama_voice.zig").Voice = &.{},
     keys: ?*auth.Store,
     late_system: []const u8 = "system",

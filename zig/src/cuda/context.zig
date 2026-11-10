@@ -5,6 +5,8 @@ const abi = @import("abi.zig");
 const Driver = @import("driver.zig").Driver;
 const Error = @import("driver.zig").Error;
 
+const context_owner = @import("context_owner.zig");
+
 pub const Context = struct {
     d: *const Driver,
     device: abi.Device,
@@ -36,6 +38,7 @@ pub const Context = struct {
         errdefer _ = d.api.cuDevicePrimaryCtxRelease_v2(dev);
         try d.check(d.api.cuCtxSetCurrent(ctx), "cuCtxSetCurrent");
         try @import("context_health.zig").retain(d, ctx);
+        context_owner.acquire(d, ctx); // several engines may share this primary context (MoM): who tears it down is counted
         @import("copy_source.zig").setCurrent(ctx);
         return .{ .d = d, .device = dev, .handle = ctx };
     }
@@ -57,14 +60,18 @@ pub const Context = struct {
             _ = d.api.cuDevicePrimaryCtxRelease_v2(dev);
             return err;
         };
+        context_owner.acquire(d, ctx); // shared by several engines (MoM): counted, like init's retain
         @import("copy_source.zig").setCurrent(ctx); // the host made it current: copy sources are tagged with it
         return .{ .d = d, .device = dev, .handle = ctx };
     }
 
     /// Waits for all work, then drops this retain; resources made in it must be released first.
+    /// With several engines sharing this primary context, only the last owner's deinit touches what
+    /// belongs to the context (the device-wide wait and the copy sources' spare pinned bytes).
     pub fn deinit(self: *Context) void {
-        self.d.synchronize() catch {};
-        @import("copy_source.zig").dropSpares(self.d, self.handle); // their pinned bytes go with the context
+        const last = context_owner.release(self.d, self.handle);
+        if (last) self.d.synchronize() catch {};
+        if (last) @import("copy_source.zig").dropSpares(self.d, self.handle); // their pinned bytes go with the context
         _ = self.d.api.cuDevicePrimaryCtxRelease_v2(self.device);
         @import("context_health.zig").release(self.d, self.handle);
         self.* = undefined;

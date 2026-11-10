@@ -20,7 +20,10 @@ pub const Snapshot = struct {
 
 const Slot = struct { taken: bool = false, snap: Snapshot = .{} };
 
-var slots: [8]Slot = @splat(.{});
+/// Slots for every graph cache the process can hold: a Mixture-of-Models server runs several engines,
+/// each with a target and (drafting) a drafter cache; a taken-out table only ever hides a report.
+pub const max_slots = 32;
+var slots: [max_slots]Slot = @splat(.{});
 var mutex: std.atomic.Mutex = .unlocked;
 
 /// Test seams: `contended` runs when a lock attempt finds it held, `reading` between a slot's name and counts copies.
@@ -138,4 +141,15 @@ test "a long name is cut to name_max and the copy outlives the caller's buffer" 
     try std.testing.expectEqual(@as(usize, 1), snapshots(&out));
     const want: [name_max]u8 = @splat('n');
     try std.testing.expectEqualStrings(&want, out[0].name());
+}
+
+test "the table holds every cache a Mixture-of-Models process runs, and reports them all" {
+    // several engines, each with a target and a drafter cache, must all get a slot; the ninth used
+    // to be the first engine's drafter left unreported
+    var claimed: [max_slots]usize = undefined;
+    for (0..max_slots) |k| claimed[k] = claim("cache").?;
+    defer for (claimed) |i| release(i);
+    try std.testing.expect(claim("one too many") == null);
+    var out: [max_slots]Snapshot = undefined;
+    try std.testing.expectEqual(@as(usize, max_slots), snapshots(&out));
 }

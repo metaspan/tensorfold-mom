@@ -180,13 +180,30 @@ pub fn plan(srv: *Server, cx: *Cx, is_chat: bool, raw: Value, format: ?[]const u
         policy.single = !p.bool;
     }
     const options = body.get("stream_options");
-    return .{
+    var plan_result = Plan{
         .input = input,
         .stream = streamed,
         .separate_usage = options != null and options.? == .object and json.truthyField(options.?, "include_usage"),
         .policy = policy,
         .named = replyModel(srv, body),
     };
+    // MoM: one routing decision per request, made here — before any forward pass. An
+    // unknown explicit id is a hard 400, replacing replyModel's silent fallback: a
+    // caller asking for a model this endpoint does not serve is told so, never quietly
+    // answered by a different model. Without a registry nothing here changes.
+    if (srv.mom) |m| {
+        const model_field: ?[]const u8 = if (body.get("model")) |mv| (if (mv == .string) mv.string else null) else null;
+        const d = m.route(cx.a, model_field, body) catch |e| switch (e) {
+            error.UnknownModel => {
+                const msg = std.fmt.allocPrint(cx.a, "the model '{s}' is not served here", .{model_field orelse ""}) catch return error.OutOfMemory;
+                return cx.refuse(msg);
+            },
+            error.OutOfMemory => return error.OutOfMemory,
+        };
+        plan_result.input.mom_lane = d.lane;
+        plan_result.named = m.lanes[d.lane].id;
+    }
+    return plan_result;
 }
 
 /// A completion's prompt as the model reads it: token ids as given, anything else as text.

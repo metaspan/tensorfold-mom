@@ -47,6 +47,14 @@ const kimiMetallib = metal_build.kimiMetallib;
 /// A module whose `bytes` is the metallib at `lib`, embedded at compile time.
 const embedded = metal_build.embedded;
 
+/// Mixture-of-Models plan tests: the pre-open budget gate and its refusal wording, pure host code.
+fn momPlanChecks(b: *std.Build, test_step: *std.Build.Step) void {
+    const mom_plan = b.createModule(.{ .root_source_file = b.path("zig/src/server/mom_plan.zig"), .target = b.graph.host, .optimize = .Debug });
+    const step = b.step("test-mom-plan", "The Mixture-of-Models load plan: co-residency budget, quotas, refusal wording");
+    step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = mom_plan })).step);
+    test_step.dependOn(step);
+}
+
 /// The page pool's own tests, and its checks under engine_api's paged store and lane host (kv_pool a module of its...
 fn poolChecks(b: *std.Build, target: std.Build.ResolvedTarget, test_step: *std.Build.Step) void {
     const pool = b.createModule(.{ .root_source_file = b.path("zig/src/core/kv_pool.zig"), .target = target, .optimize = .Debug });
@@ -208,6 +216,7 @@ pub fn build(b: *std.Build) void {
         test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = api_mod })).step);
     }
     poolChecks(b, b.graph.host, test_step);
+    momPlanChecks(b, test_step);
     const with_hip = b.option(bool, "hip", "Enable the opt-in HIP backend and its host/device targets") orelse false;
     const hip_options = hip_build.options(b); // declared on every target (#1165), used only with -Dhip=true
     hip_build.loaderTests(b, test_step);

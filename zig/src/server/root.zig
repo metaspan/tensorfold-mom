@@ -13,11 +13,19 @@ pub const serve = @import("serve.zig");
 pub const idle_unload = @import("idle_unload.zig");
 pub const hub = @import("hub.zig");
 pub const tool_specs = @import("tool_specs.zig");
+pub const mom_plan = @import("mom_plan.zig");
+pub const mom_main = @import("mom_main.zig");
+pub const mom_router = @import("mom_router.zig");
+pub const mom_registry = @import("mom_registry.zig");
 pub const Server = server.Server;
 pub const Config = server.Config;
 
 test {
     _ = @import("startup_receipt.zig");
+    _ = @import("mom_plan.zig");
+    _ = @import("mom_main.zig");
+    _ = @import("mom_router.zig");
+    _ = @import("mom_registry.zig");
     _ = @import("kimi_prompt_test.zig");
     _ = @import("kimi_text_test.zig");
     _ = @import("kimi_reply_test.zig");

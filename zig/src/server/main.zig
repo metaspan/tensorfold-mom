@@ -16,6 +16,7 @@ const benchmark = @import("benchmark.zig");
 const checkpoint_cli = @import("checkpoint_cli");
 const pdf_worker = @import("pdf_worker.zig");
 const web_cli = @import("web_cli.zig");
+const mom_main = @import("mom_main.zig");
 
 const usage_line = "usage: tensorfold serve [-h] [--host HOST] [--port PORT] [--unix-socket PATH] [--name NAME] [--chat-template FILE]" ++
     " [--alias ALIAS] [--allowed-host NAME] [--allowed-origin ORIGIN] [--api-key API_KEY] [--api-key-file API_KEY_FILE] [--metrics-open] [--dashboard]" ++
@@ -78,6 +79,8 @@ pub fn main(init: std.process.Init) !u8 {
     if (argv.len >= 2 and checkpoint_cli.wants(@ptrCast(argv[1..]))) return checkpoint_cli.main(init, argv[1..]);
     if (argv.len >= 2 and std.mem.eql(u8, argv[1], "slide")) return slide_cli.main(init, argv[2..]);
     log.init(io, false);
+    // Mixture-of-Models: one process, one endpoint, several checkpoints (see server/mom_main.zig)
+    if (argv.len >= 2 and std.mem.eql(u8, argv[1], "mom-serve")) return mom_main.run(init, argv[2..]);
     if (argv.len == 3 and std.mem.eql(u8, argv[1], "capabilities") and std.mem.eql(u8, argv[2], "--json")) {
         if (try engines.environment(a, .{})) |why| return fail(why);
         var out: std.Io.Writer.Allocating = .init(a);
