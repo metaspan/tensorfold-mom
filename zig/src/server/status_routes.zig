@@ -84,6 +84,17 @@ pub fn models(srv: *Server, conn: *Conn, a: Allocator) !void {
     for (srv.config.model_ids, data) |id, *slot| {
         slot.* = try modelValue(a, id, info, created, reasoning);
     }
+    // MoM observability: each advertised id carries its lane's decision count.
+    if (srv.mom) |m| for (srv.config.model_ids, data) |id, *slot| {
+        if (slot.* != .object) continue;
+        for (m.lanes, 0..) |lane, li| {
+            if (!std.mem.eql(u8, lane.id, id)) continue;
+            const mo = try json.newObject(a);
+            try mo.put(a, "decisions", try json.intValue(a, m.decisionCount(li)));
+            try mo.put(a, "role", .{ .string = m.laneRoleName(li) });
+            try slot.*.object.put(a, "mom", .{ .object = mo });
+        }
+    };
     const o = try json.newObject(a);
     try o.put(a, "object", .{ .string = "list" });
     try o.put(a, "data", .{ .array = data });

@@ -35,6 +35,21 @@ pub const Registry = struct {
     log_file: ?std.Io.File = null,
     io: std.Io,
     mutex: std.Io.Mutex = .init,
+    /// Observability (brief component 7): decisions per lane since start; /v1/models
+    /// reports them per advertised id. Capped by the router's lane limit.
+    decision_counts: [16]u32 = @splat(0),
+    decision_total: u64 = 0,
+
+    pub fn laneRoleName(self: *const Registry, li: usize) []const u8 {
+        const role: mom_router.Role = if (li < self.router.cfg.lanes.len) self.router.cfg.lanes[li].role else .other;
+        return switch (role) { .trivial => "trivial", .default_lane => "default", .other => "other" };
+    }
+
+    pub fn decisionCount(self: *Registry, lane: usize) u32 {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        return if (lane < self.decision_counts.len) self.decision_counts[lane] else 0;
+    }
 
     /// The single routing call per request: resolve the explicit field (unknown id
     /// is a hard refusal), else sticky, else trivial rules, else default lane.
@@ -46,6 +61,8 @@ pub const Registry = struct {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         const d = try self.router.decide(model, text, ck);
+        if (d.lane < self.decision_counts.len) self.decision_counts[d.lane] += 1;
+        self.decision_total += 1;
         if (self.log_file) |f| self.logDecision(f, model, d);
         return .{ .lane = d.lane, .reason = d.reason };
     }
@@ -159,6 +176,34 @@ test "registry: lastUserText takes the last user string, multimodal parts joined
     try std.testing.expectEqualStrings("a b", try lastUserText(a, body2));
     const body3 = (try json.parse(a, "{\"messages\":[{\"role\":\"system\",\"content\":\"s\"}]}")).ok;
     try std.testing.expectEqualStrings("", try lastUserText(a, body3));
+}
+
+test "registry: route counts decisions per lane" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const lane_defs = [_]mom_router.Lane{
+        .{ .id = "small", .role = .trivial },
+        .{ .id = "big", .role = .default_lane },
+    };
+    var reg: Registry = .{
+        .lanes = &.{},
+        .router = .{
+            .cfg = .{ .lanes = &lane_defs, .sticky_enabled = false },
+            .sticky = try mom_router.Sticky.init(a, 8),
+        },
+        .io = std.testing.io,
+    };
+    const trivial = (try json.parse(a, "{\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}]}")).ok;
+    const heavy = (try json.parse(a, "{\"messages\":[{\"role\":\"user\",\"content\":\"Please implement a full test suite and then review the distributed cache design carefully.\"}]}")).ok;
+    _ = try reg.route(a, null, trivial);
+    _ = try reg.route(a, null, trivial);
+    _ = try reg.route(a, null, heavy);
+    try std.testing.expectEqual(@as(u32, 2), reg.decisionCount(0));
+    try std.testing.expectEqual(@as(u32, 1), reg.decisionCount(1));
+    try std.testing.expectEqual(@as(u64, 3), reg.decision_total);
+    try std.testing.expectEqualStrings("trivial", reg.laneRoleName(0));
+    try std.testing.expectEqualStrings("default", reg.laneRoleName(1));
 }
 
 test "registry: convKey is stable as the conversation grows" {
