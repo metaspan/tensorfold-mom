@@ -93,6 +93,16 @@ pub fn models(srv: *Server, conn: *Conn, a: Allocator) !void {
             try mo.put(a, "decisions", try json.intValue(a, m.decisionCount(li)));
             try mo.put(a, "role", .{ .string = m.laneRoleName(li) });
             if (m.hasIdlePolicy(li)) try mo.put(a, "state", .{ .string = m.laneStateName(li) });
+            // Engine-owned memory from the lane's own accounting (brief component 7:
+            // memory pressure per model); absent for a parked lane (engine closed).
+            if (m.lanes[li].engine) |e| {
+                if (e.memory(false)) |mem| {
+                    const mm = try json.newObject(a);
+                    try mm.put(a, "active", try json.intValue(a, mem.active));
+                    try mm.put(a, "peak", try json.intValue(a, mem.peak));
+                    try mo.put(a, "memory", .{ .object = mm });
+                }
+            }
             try slot.*.object.put(a, "mom", .{ .object = mo });
         }
     };
