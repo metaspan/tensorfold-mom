@@ -84,13 +84,18 @@ const Sleeper = struct {
                 const now: i64 = @intCast(@import("clock.zig").nowNs(self.io));
                 if (!lc.shouldSleep(now)) continue;
                 if (!lc.claimUnload()) continue; // a lease (or a state move) saved it
+                // Teardown is atomic against lease(): a request cannot attach to
+                // an engine mid-close (the B4 503 race). Waiters are answered by
+                // finishUnloadLocked's broadcast when the lock drops.
+                lc.lock();
                 const oslot = &self.ctx.opened[i];
                 if (oslot.*) |o| {
                     o.close(o.ctx);
                     oslot.* = null;
                 }
                 self.ctx.lanes[i].engine = null; // readers meet it resident (route wakes); submit's refuse is the belt
-                lc.finishUnload();
+                lc.finishUnloadLocked();
+                lc.unlock();
                 log.line("mom: {s} asleep (idle)", .{self.ctx.held[i].spec.name});
             }
         }

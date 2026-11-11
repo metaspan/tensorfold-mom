@@ -78,12 +78,7 @@ pub const Registry = struct {
             const st = lc.state;
             lc.unlock();
             switch (st) {
-                .resident, .unloading => break, // unloading: lease() below cancels the park
-                .loading => {
-                    lc.lock();
-                    while (lc.state == .loading) lc.cond.waitUncancelable(self.io, &lc.mutex);
-                    lc.unlock();
-                },
+                .resident, .unloading, .loading => {}, // lease() itself waits out an in-flight park/wake
                 .unloaded => {
                     if (!lc.claimWake()) continue; // another waker won; loop to wait
                     const rr = self.reopen orelse {
@@ -96,12 +91,11 @@ pub const Registry = struct {
                         return false;
                     };
                     lc.finishWake(self.nowNsPriv());
-                    break;
                 },
             }
+            if (!lc.lease(self.nowNsPriv())) continue; // a park landed under us: retry via wake
+            return true;
         }
-        lc.lease(self.nowNsPriv());
-        return true;
     }
 
     /// The request's engine-using window ends (any outcome).

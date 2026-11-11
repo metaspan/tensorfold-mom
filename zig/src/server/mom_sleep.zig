@@ -1,9 +1,9 @@
 //! Per-lane engine lifecycle for MoM sleep/wake (docs/08-b4-sleep-wake.md).
 //!
 //! The state machine generalized from server/idle_unload.zig's Manager: same
-//! lifecycle semantics (leases prevent closing an engine mid-request; a
-//! request arriving during `unloading` cancels the park), scoped to one lane
-//! slot instead of the server's single engine. Pure logic: no CUDA, no clock
+//! lifecycle semantics (leases prevent closing an engine mid-request; a park
+//! that has claimed runs to completion while new leases wait, then retry as a
+//! wake), scoped to one lane slot instead of the server's single engine. Pure logic: no CUDA, no clock
 //! of its own — the caller passes `now_ns` it read from server/clock.zig, so
 //! every transition is host-testable.
 
@@ -34,14 +34,21 @@ pub const LaneLifecycle = struct {
         self.mutex.unlock(self.io);
     }
 
-    /// A request starts engine work: raises `active`, refreshes the idle
-    /// deadline, and cancels an in-flight park (idle_unload.begin semantics).
-    pub fn lease(self: *LaneLifecycle, now_ns: i64) void {
+    /// A request starts engine work: raises `active`, refreshes the idle deadline.
+    /// A park that already claimed is never cancelled mid-close (the engine dies
+    /// under a lease is use-after-free); the lease waits for the park (or a
+    /// concurrent wake) to settle instead. False = the lane settled asleep: the
+    /// caller must loop through wake-on-route and retry. The invariant lease
+    /// hands back: state == resident implies the lane's engine is non-null.
+    pub fn lease(self: *LaneLifecycle, now_ns: i64) bool {
         self.lock();
         defer self.unlock();
-        if (self.state == .unloading) self.state = .resident;
+        while (self.state == .unloading or self.state == .loading)
+            self.cond.waitUncancelable(self.io, &self.mutex);
+        if (self.state != .resident) return false; // unloaded: caller retries via wake
         self.active += 1;
         self.last_used_ns = now_ns;
+        return true;
     }
 
     /// The request ended, any outcome: drops `active` and re-arms the window.
@@ -78,9 +85,16 @@ pub const LaneLifecycle = struct {
     pub fn finishUnload(self: *LaneLifecycle) void {
         self.lock();
         defer self.unlock();
-        if (self.state != .unloading) return; // a lease cancelled it
+        self.finishUnloadLocked();
+    }
+
+    /// For a timer that holds the lock across engine teardown: close + null +
+    /// finish under one lock is what makes `resident => engine non-null` hold.
+    pub fn finishUnloadLocked(self: *LaneLifecycle) void {
+        if (self.state != .unloading) return; // cancelled before the claim landed
         self.state = .unloaded;
         self.sleep_total += 1;
+        self.cond.broadcast(self.io);
     }
 
     /// Claim a wake: unloaded -> loading; the caller then opens the engine and
@@ -125,17 +139,22 @@ test "sleep: idle arithmetic respects the never-sleep window" {
     try std.testing.expect(lc.shouldSleep(20 * std.time.ns_per_s));
 }
 
-test "sleep: lease blocks the park and cancels a claimed one" {
+test "sleep: a claimed park runs to completion; late leases become wake retries" {
     var lc: LaneLifecycle = .{ .io = std.testing.io, .idle_ns = 10 * std.time.ns_per_s };
     lc.last_used_ns = 0;
+    // Timer claims and finishes the park (the close itself happens under the lock in mom_main).
     try std.testing.expect(lc.claimUnload());
-    try std.testing.expectEqual(State.unloading, lc.state);
-    // A request arriving mid-park cancels it (idle_unload.begin semantics).
-    lc.lease(50 * std.time.ns_per_s);
-    try std.testing.expectEqual(State.resident, lc.state);
-    lc.finishUnload(); // stale claim must not unload a resident lane
-    try std.testing.expectEqual(State.resident, lc.state);
-    lc.release(60 * std.time.ns_per_s);
+    lc.finishUnload();
+    try std.testing.expectEqual(State.unloaded, lc.state);
+    // A lease cannot attach to a sleeping lane: the caller loops through wake.
+    try std.testing.expect(!lc.lease(20 * std.time.ns_per_s));
+    try std.testing.expectEqual(@as(u32, 0), lc.active);
+    // The wake path re-attaches normally.
+    try std.testing.expect(lc.claimWake());
+    lc.finishWake(25 * std.time.ns_per_s);
+    try std.testing.expect(lc.lease(25 * std.time.ns_per_s));
+    try std.testing.expectEqual(@as(u32, 1), lc.active);
+    lc.release(30 * std.time.ns_per_s);
     try std.testing.expectEqual(@as(u32, 0), lc.active);
 }
 
