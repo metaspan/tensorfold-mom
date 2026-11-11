@@ -221,7 +221,10 @@ pub fn save(ptr: *anyopaque, owner: ?*anyopaque, at: u32) anyerror!*anyopaque {
     const cache = t.caches.get(s) orelse return error.UnknownStream;
     const copy = try saveCache(t.e, cache, at, t.seen.get(s) orelse &.{}, t.device and t.ctx == null);
     // MoM M3 (docs/13): the paired thin engine adopts from this record; a bookkeeping OOM just keeps the previous record.
-    if (t.adopt_sink) |sink| sink.record(t.e.gpa, copy, at, s.prompt()) catch {};
+    if (t.adopt_sink) |sink| {
+        sink.record(t.e.gpa, copy, at, s.prompt()) catch {};
+        if (sink.live) std.log.info("qwen3_5: adopt sink at {d} of {d} prompt tokens", .{ sink.at, sink.tokens.len });
+    }
     // TF_MOM_KVDUMP (docs/12 S1): the same checkpoint lands in the dump directory; a failed dump never fails the save.
     if (kvdumpWriter.dumpDir() != null) {
         const e = t.e;

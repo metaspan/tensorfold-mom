@@ -128,29 +128,41 @@ def main() -> int:
     time.sleep(4)
 
     # B. ONE boot with adoption on: the parent fills kept states, then the nested lane
-    # replays in the SAME process (a restart would drop the parent's kept states).
-    # Adoption fires only on a cold nested miss: early turns self-hit the nested store,
-    # the longest prompt (last turn) is the adopt -- the 'adopted' log line proves it.
+    # answers ONLY the last turn's prompt -- the shape adoption exists for (a hop:
+    # long prompt, cold for the nested store, warm in the parent's sink). Replaying
+    # every turn self-hits the nested store and adoption can never fire (run 1:
+    # hits 7, misses 1 -- the lone cold miss was turn 1, too short vs the deep sink).
     p = boot({"TF_MOM_ADOPT": "1"})
     if p is None:
         return 2
     try:
-        _ = replay(BIG_NAME, user_turns, replies)  # parent prefills the same prefixes (fills the sink)
-        adopt = replay(NESTED_NAME, user_turns, replies)
+        _ = replay(BIG_NAME, user_turns, replies)  # parent prefills the whole conversation
+        hist = [{"role": "system", "content": SYSTEM}]
+        for i, c in enumerate(user_turns):
+            hist.append({"role": "user", "content": c})
+            if i + 1 < len(user_turns):
+                hist.append({"role": "assistant", "content": replies[i]})
+        r = post({"model": NESTED_NAME, "messages": hist, "max_tokens": 24, "temperature": 0,
+                  "stream": False, "chat_template_kwargs": {"enable_thinking": False}})
+        adopt = [r["choices"][0]["message"]["content"]]
     finally:
         kill(p)
-    adopted_lines = [l for l in open(LOG) if "adopt" in l.lower()]
+    # Only the real thing counts: 'adopted the paired engine's kept state' from adoptMiss.
+    # (The parent's 'adopt sink at ...' save lines would otherwise make the gate vacuous.)
+    adopted_lines = [l for l in open(LOG) if "adopted the paired" in l.lower()]
     json.dump({"baseline": base, "adopted": adopt, "log_adopt_lines": adopted_lines},
               open(f"{OUT}/g3.json", "w"), indent=1)
 
-    mism = [i for i, (a, b) in enumerate(zip(base, adopt)) if a != b]
+    ok = adopt[0] == base[-1]
     if not adopted_lines:
         print("G3: NOT RUN -- server logged no 'adopt' lines (wiring absent?); "
               "refusing to call this PASS")
         return 3
-    print(f"G3 decode-resume gate: {'PASS' if not mism else f'FAIL at turns {mism}'} "
-          f"({len(base)} turns; adopt log lines: {len(adopted_lines)})")
-    return 0 if not mism else 1
+    print(f"G3 decode-resume gate: {'PASS' if ok else 'FAIL'} "
+          f"(hop turn vs baseline; adopt log lines: {len(adopted_lines)})")
+    if not ok:
+        print(f"  baseline: {base[-1]!r}\n  adopted : {adopt[0]!r}")
+    return 0 if ok else 1
 
 
 if __name__ == "__main__":
