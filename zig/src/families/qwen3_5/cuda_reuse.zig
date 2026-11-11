@@ -221,6 +221,8 @@ pub fn save(ptr: *anyopaque, owner: ?*anyopaque, at: u32) anyerror!*anyopaque {
     const cache = t.caches.get(s) orelse return error.UnknownStream;
     // MoM M3 diagnostic: TF_MOM_ADOPT_HOST keeps the records host-readable for the byte audit.
     const keep_host = adoptEnabled() and std.c.getenv("TF_MOM_ADOPT_HOST") != null;
+    if (keep_host and std.c.getenv("TF_MOM_AUDIT_COLD") != null)
+        std.log.info("qwen3_5: adopt audit save at {d} cuts {any}", .{ at, s.chunks });
     const copy = try saveCache(t.e, cache, at, t.seen.get(s) orelse &.{}, t.device and t.ctx == null and !keep_host);
     // the audit fires either after an adoption (kv pieces only: the state block was resumed and mutated)
     // or, when TF_MOM_AUDIT_COLD is set, on this engine's own cold save (no resume: the state block is
@@ -240,7 +242,7 @@ pub fn save(ptr: *anyopaque, owner: ?*anyopaque, at: u32) anyerror!*anyopaque {
             if (AdoptMap.buildParams(t.e.gpa, p.e.g, t.e.g, formatOf(t.e), at)) |dm| {
                 var dmm = dm;
                 defer dmm.free(t.e.gpa);
-                diffAudit(.{ .parent_copy = pc, .map = dmm, .parent_layers = p.e.g.layers }, copy, true);
+                diffAudit(.{ .parent_copy = pc, .map = dmm, .parent_layers = p.e.g.layers, .pg = p.e.g }, copy, true);
             }
             break :scan;
         }
@@ -556,6 +558,7 @@ pub const AdoptAudit = struct {
     parent_copy: *Copy,
     map: AdoptMap,
     parent_layers: usize,
+    pg: Geometry,
 };
 var audit: ?AdoptAudit = null;
 
@@ -640,7 +643,7 @@ pub fn adoptMiss(ptr: *anyopaque, owner: ?*anyopaque, prompt: []const u32) anyer
     try adoptCache(t.e, cache, b.copy, &b.map);
     // arm the byte audit: the nested engine's next save of this prompt is the ground truth (diagnostic)
     if (AdoptMap.buildParams(t.e.gpa, b.pe.g, t.e.g, formatOf(t.e), b.map.at)) |dm| {
-        audit = .{ .parent_copy = b.copy, .map = dm, .parent_layers = b.pe.g.layers };
+        audit = .{ .parent_copy = b.copy, .map = dm, .parent_layers = b.pe.g.layers, .pg = b.pe.g };
     }
     std.log.warn("qwen3_5: adopted the paired engine's kept state at {d} tokens", .{b.map.at});
     return b.from;
@@ -666,6 +669,15 @@ fn diffAudit(a: AdoptAudit, copy: *Copy, compare_state: bool) void {
             var k: usize = 0;
             while (k < w.len and src[k] == dst[k]) : (k += 1) {}
             std.log.warn("qwen3_5: adopt audit piece {d} DIFFERS: first byte {d} of {d}", .{ i, k, w.len });
+            if (i == 0) { // the state block: name the regions and the head (region = recurrence + conv tail)
+                const gp = a.pg;
+                const region = gp.recBytes() + gp.convBytes();
+                const per_head = gp.v_heads * gp.dk * gp.dk * 4 / gp.v_heads;
+                const reg = k / region;
+                std.log.warn("qwen3_5: adopt audit state: region {d} of {d} (rec {d} + conv {d}), byte {d} in region (head ~{d} of {d})", .{
+                    reg, a.map.writes[0].len / region, gp.recBytes(), gp.convBytes(), k % region, (k % region) / per_head, gp.v_heads,
+                });
+            }
         }
     }
     const n = a.map.writes.len - 1 - if (compare_state) @as(usize, 0) else 1;
