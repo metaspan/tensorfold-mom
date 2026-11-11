@@ -268,7 +268,7 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
     adopt_root.addImport("qwen35_layers", b.createModule(.{ .root_source_file = b.path("zig/src/core/qwen35_layers.zig"), .target = host, .optimize = .debug }));
     adopt_root.addImport("qwen35_rules", b.createModule(.{ .root_source_file = b.path("zig/src/core/qwen35_rules.zig"), .target = host, .optimize = .debug }));
     adopt_root.addImport("kvdump_format", b.createModule(.{ .root_source_file = b.path("zig/src/families/qwen3_5/kvdump_format.zig"), .target = host, .optimize = .debug }));
-    const adopt_tests = b.addRunArtifact(b.addTest(.{ .root_module = adopt_root, .filters = &.{"adoption map"} }));
+    const adopt_tests = b.addRunArtifact(b.addTest(.{ .root_module = adopt_root, .filters = &.{ "adoption map", "adopt sink" } }));
     b.step("test-mom-adopt-host", "Nested-upcycle adoption map arithmetic without a GPU").dependOn(&adopt_tests.step);
     step.dependOn(&adopt_tests.step);
     const bolt = b.step("test-bolt-host", "Nemotron Bolt and shared lane host contracts");

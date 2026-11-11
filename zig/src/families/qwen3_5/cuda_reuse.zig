@@ -50,6 +50,32 @@ pub const Target = struct {
     device: bool = false, // an integrated GPU: saves go to device memory, unless the disk tier reads them (ctx)
     /// TF_MOM_KVDUMP's files are written through this (cuda_kvdump.zig, docs/12 S1).
     io: std.Io,
+    /// MoM M3 (docs/13): when set (the parent side, TF_MOM_ADOPT), `save` records its last
+    /// kept state here so the paired thin engine can adopt it; `drop` retires the record.
+    adopt_sink: ?*AdoptSink = null,
+};
+
+/// MoM M3: the last state a parent Target saved, named by the tokens it stands after.
+/// The `copy` belongs to the store: `live` means it has not been dropped since the save.
+pub const AdoptSink = struct {
+    copy: ?*anyopaque = null,
+    at: u32 = 0,
+    tokens: []const u32 = &.{},
+    live: bool = false,
+
+    /// Take ownership of a fresh token copy standing after `at` tokens of `copy`.
+    pub fn record(self: *AdoptSink, a: std.mem.Allocator, copy: *anyopaque, at: u32, prompt: []const u32) !void {
+        const tok = try a.alloc(u32, prompt.len);
+        @memcpy(tok, prompt);
+        self.clear(a);
+        self.* = .{ .copy = copy, .at = at, .tokens = tok, .live = true };
+    }
+
+    /// Retire the record (a drop of the recorded copy, or a take-over by `record`).
+    pub fn clear(self: *AdoptSink, a: std.mem.Allocator) void {
+        if (self.tokens.len != 0) a.free(self.tokens);
+        self.* = .{};
+    }
 };
 
 /// One piece of a stream's state: its offset in the state or key/value buffer, its length.
@@ -194,6 +220,8 @@ pub fn save(ptr: *anyopaque, owner: ?*anyopaque, at: u32) anyerror!*anyopaque {
     const s: *lanes.Stream = @ptrCast(@alignCast(owner orelse return error.NoStream));
     const cache = t.caches.get(s) orelse return error.UnknownStream;
     const copy = try saveCache(t.e, cache, at, t.seen.get(s) orelse &.{}, t.device and t.ctx == null);
+    // MoM M3 (docs/13): the paired thin engine adopts from this record; a bookkeeping OOM just keeps the previous record.
+    if (t.adopt_sink) |sink| sink.record(t.e.gpa, copy, at, s.prompt()) catch {};
     // TF_MOM_KVDUMP (docs/12 S1): the same checkpoint lands in the dump directory; a failed dump never fails the save.
     if (kvdumpWriter.dumpDir() != null) {
         const e = t.e;
@@ -330,6 +358,7 @@ pub fn restore(ptr: *anyopaque, owner: ?*anyopaque, saved: *anyopaque) anyerror!
 /// Free a kept state's copy.
 pub fn drop(ptr: *anyopaque, saved: *anyopaque) void {
     const t: *Target = @ptrCast(@alignCast(ptr));
+    if (t.adopt_sink) |sink| if (sink.live and sink.copy.? == saved) sink.clear(t.e.gpa); // MoM M3: a retired copy is never adopted
     dropCopy(t.e, @ptrCast(@alignCast(saved)));
 }
 
@@ -768,4 +797,26 @@ test "a device save pins nothing: it copies on the device both ways, and its dro
     dropCopy(&e, copy);
     try std.testing.expectEqual(@as(usize, 1), DeviceFake.frees);
     try std.testing.expectEqual(@as(usize, 0), DeviceFake.pinned + DeviceFake.host_copies);
+}
+
+test "adopt sink: record owns a token copy, clear and re-record free it" {
+    const a = std.testing.allocator;
+    var sink: AdoptSink = .{};
+    defer sink.clear(a);
+    var copy_a: u8 = 0;
+    var copy_b: u8 = 0;
+    try sink.record(a, &copy_a, 12, &.{ 1, 2, 3 });
+    try std.testing.expect(sink.live);
+    try std.testing.expectEqual(@as(?*anyopaque, @ptrCast(&copy_a)), sink.copy);
+    try std.testing.expectEqual(@as(u32, 12), sink.at);
+    try std.testing.expectEqualSlices(u32, &.{ 1, 2, 3 }, sink.tokens);
+    // re-record takes over: the old token slice is freed, the record names the new copy
+    try sink.record(a, &copy_b, 20, &.{ 4, 5 });
+    try std.testing.expectEqual(@as(?*anyopaque, @ptrCast(&copy_b)), sink.copy);
+    try std.testing.expectEqualSlices(u32, &.{ 4, 5 }, sink.tokens);
+    // clear retires it whole (the drop hook's path)
+    sink.clear(a);
+    try std.testing.expect(!sink.live);
+    try std.testing.expectEqual(@as(?*anyopaque, null), sink.copy);
+    try std.testing.expectEqual(@as(usize, 0), sink.tokens.len);
 }
