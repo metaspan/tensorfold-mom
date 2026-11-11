@@ -137,7 +137,14 @@ fn opening(self: anytype, stream: *lanes.Stream) !Fill {
                 stream.reuse_failed = true;
             }
         } else stream.reuse_failed = true;
-    }
+    } else if (reuse.adoptMiss(&self.target, stream, ids)) |hit| { // MoM M3 (docs/13): cold -- a paired, deeper engine's kept prefix may serve
+        if (hit) |from| {
+            if (from < ids.len and coldCut(ids.len, stream.chunks, from)) { // same rule as a same-engine restore: resume only at a cold cut
+                at = from;
+                stream.cached = @intCast(from);
+            } else try cache.reset(self.e); // adopted bytes stand at a non-cut row: cold prefill instead
+        }
+    } else |_| {}
     cache.untaught = stream.untaught;
     stream.fill_at.store(@intCast(at), .monotonic);
     return .{ .at = at, .media = media, .kept = if (shared) |x| .{ .gpa = self.gpa, .marks = x.plan.marks } else null };
