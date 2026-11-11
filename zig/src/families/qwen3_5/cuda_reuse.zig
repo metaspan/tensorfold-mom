@@ -5,6 +5,7 @@ const lanes = @import("lanes");
 const geometry = @import("cuda_geometry.zig");
 const engine = @import("cuda_engine.zig");
 const caches = @import("cuda_cache.zig");
+const kvdumpWriter = @import("cuda_kvdump.zig");
 
 const Engine = engine.Engine;
 const Cache = engine.Cache;
@@ -47,6 +48,8 @@ pub const Target = struct {
     seen: *std.AutoHashMapUnmanaged(*lanes.Stream, []Seen),
     ctx: ?*const cuda.Context = null, // --learn-conversations: made current where the disk tier allocates copies
     device: bool = false, // an integrated GPU: saves go to device memory, unless the disk tier reads them (ctx)
+    /// TF_MOM_KVDUMP's files are written through this (cuda_kvdump.zig, docs/12 S1).
+    io: std.Io,
 };
 
 /// One piece of a stream's state: its offset in the state or key/value buffer, its length.
@@ -190,7 +193,21 @@ pub fn save(ptr: *anyopaque, owner: ?*anyopaque, at: u32) anyerror!*anyopaque {
     const t: *Target = @ptrCast(@alignCast(ptr));
     const s: *lanes.Stream = @ptrCast(@alignCast(owner orelse return error.NoStream));
     const cache = t.caches.get(s) orelse return error.UnknownStream;
-    return @ptrCast(try saveCache(t.e, cache, at, t.seen.get(s) orelse &.{}, t.device and t.ctx == null));
+    const copy = try saveCache(t.e, cache, at, t.seen.get(s) orelse &.{}, t.device and t.ctx == null);
+    // TF_MOM_KVDUMP (docs/12 S1): the same checkpoint lands in the dump directory; a failed dump never fails the save.
+    if (kvdumpWriter.dumpDir() != null) {
+        const e = t.e;
+        const sb = e.g.stateBytes();
+        const region: []const u8 = if (copy.dev == null and copy.host.bytes.len >= sb) copy.host.bytes[sb..] else &.{};
+        const pt: u32 = if (cache.paged) |p| @intCast(p.tokens) else 0;
+        if (kvdumpWriter.dump(e, t.io, s.prompt(), at, pt, region, copy.dev)) |w| {
+            std.log.warn("qwen3_5: kvdump ckpt{d} at {d} tokens ({d} attention layers) -> {s}", .{ w.ckpt, at, e.g.attentions(), w.dir });
+            e.gpa.free(w.dir);
+        } else |err| {
+            std.log.warn("qwen3_5: kvdump checkpoint at {d} tokens skipped: {s}", .{ at, @errorName(err) });
+        }
+    }
+    return @ptrCast(copy);
 }
 
 /// A copy of `cache` at `at` rows, on the host or the `device`, naming the prompt's images that start before it.

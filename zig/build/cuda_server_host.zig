@@ -15,12 +15,14 @@ pub fn steps(b: *std.Build, host: std.Build.ResolvedTarget, cuda: *std.Build.Mod
         .imports = &.{ .{ .name = "engine_api", .module = native_modules.api }, .{ .name = "tokenizer", .module = mods.tokenizer }, .{ .name = "template", .module = template }, .{ .name = "living", .module = mods.living }, .{ .name = "core", .module = mods.core } },
     });
     const server_json = @import("server.zig").addTo(b, server_tests, host, .debug);
+    // S1 (docs/12): the pure KV-dump format the mom host tests check (test-mom-host, filter "kvdump")
+    server_tests.addImport("kvdump_format", b.createModule(.{ .root_source_file = b.path("zig/src/families/qwen3_5/kvdump_format.zig"), .target = host, .optimize = .debug }));
     const startup_receipt = b.step("test-startup-receipt-host", "Monotonic startup receipts and fail-closed readiness without devices");
     const startup_spans = b.createModule(.{ .root_source_file = b.path("zig/src/core/startup_receipt.zig"), .target = host, .link_libc = true });
     startup_receipt.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = startup_spans, .filters = &.{"startup receipt:"} })).step);
     startup_receipt.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{"startup receipt:"} })).step);
     const mom_host = b.step("test-mom-host", "Mixture-of-Models plan, argv split and co-residency checks without a GPU");
-    mom_host.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{ "plan ", "planLine", "parseSpecs", "weightsBytes", "priorityIndex", "router:", "registry:", "sleep:" } })).step);
+    mom_host.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{ "plan ", "planLine", "parseSpecs", "weightsBytes", "priorityIndex", "router:", "registry:", "sleep:", "kvdump" } })).step);
     @import("q27_profile_host.zig").steps(b, server_tests);
     b.step("test-drama-cfg-host", "Drama CFG CLI, HTTP and voice transitions without GPU execution").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{"CFG"} })).step);
     b.step("test-speech-redraw-deadline-host", "Busy speech redraw expiry without counting an unsubmitted take").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{"a busy redraw stops at its latest start"} })).step);

@@ -28,6 +28,7 @@ test {
     _ = @import("mom_router.zig");
     _ = @import("mom_registry.zig");
     _ = @import("mom_sleep.zig");
+    _ = @import("mom_kvdump_test.zig");
     _ = @import("kimi_prompt_test.zig");
     _ = @import("kimi_text_test.zig");
     _ = @import("kimi_reply_test.zig");
