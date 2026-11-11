@@ -162,53 +162,8 @@ def main() -> int:
     finally:
         kill(p)
 
-    failures = 0
-    for k in range(len(user_turns) + 1):
-        try:
-            da = s1_fit.load_dump(os.path.join(DUMP, "qwen36-nested-16l", f"ckpt{k}.bin"),
-                                  os.path.join(DUMP, "qwen36-nested-16l", f"ckpt{k}.json"))
-            db = s1_fit.load_dump(os.path.join(DUMP, "qwen36-35b-a3b-nvfp4", f"ckpt{k}.bin"),
-                                  os.path.join(DUMP, "qwen36-35b-a3b-nvfp4", f"ckpt{k}.json"))
-        except FileNotFoundError as e:
-            print(f"ckpt{k}: missing dump ({e})")
-            failures += 1
-            continue
-        if da.tokens != db.tokens:
-            for pos, (x, y) in enumerate(zip(da.tokens, db.tokens)):
-                if x != y:
-                    lo = max(0, pos - 4)
-                    print(f"ckpt{k}: TOKEN MISMATCH at pos {pos}: "
-                          f"nested {da.tokens[lo:pos+5]} | parent {db.tokens[lo:pos+5]}")
-                    break
-            else:
-                print(f"ckpt{k}: token LENGTH differs {len(da.tokens)} vs {len(db.tokens)}")
-            failures += 1
-            continue
-        layers = sorted(set(da.layers) & set(db.layers) & set(SHARED))
-        if not layers:
-            print(f"ckpt{k}: no shared layers present")
-            failures += 1
-            continue
-        row_bad = 0
-        for L in layers:
-            for kind in ("K", "V"):
-                ra, rb = da.rows.get((L, kind)), db.rows.get((L, kind))
-                if ra is None or rb is None or ra.shape != rb.shape:
-                    print(f"ckpt{k} L{L}{kind}: shape/presence mismatch")
-                    row_bad += 1
-                    continue
-                if not np.array_equal(ra, rb):
-                    nd = int((ra != rb).sum())
-                    print(f"ckpt{k} L{L}{kind}: {nd}/{ra.size} values differ "
-                          f"(max |d|={np.abs(ra.astype(np.float32)-rb.astype(np.float32)).max():.4g})")
-                    row_bad += 1
-        print(f"ckpt{k}: {len(da.tokens)} tok, layers {layers}, "
-              f"{'IDENTICAL' if row_bad == 0 else f'{row_bad} ROW-IDENTITY FAILURES'}")
-        failures += row_bad
-
-    print(f"\nM2-TF identity gate: {'PASS' if failures == 0 else f'FAIL ({failures})'} — "
-          f"{len(user_turns)+1} checkpoints, layers {SHARED}, K+V bit-identical required")
-    return 0 if failures == 0 else 1
+    from m2_tf_score import main as score_main
+    return score_main([DUMP])
 
 
 if __name__ == "__main__":
