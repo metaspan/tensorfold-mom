@@ -225,7 +225,8 @@ pub fn save(ptr: *anyopaque, owner: ?*anyopaque, at: u32) anyerror!*anyopaque {
     // the audit fires either after an adoption (kv pieces only: the state block was resumed and mutated)
     // or, when TF_MOM_AUDIT_COLD is set, on this engine's own cold save (no resume: the state block is
     // byte-fresh, so a match proves the map copies exactly what the engine itself writes).
-    if (takeAudit()) |a| {
+    if (takeAudit()) |aa| {
+        var a = aa;
         defer a.map.free(t.e.gpa);
         if (t.e.g.layers < a.parent_layers) diffAudit(a, copy, false);
     } else if (keep_host and std.c.getenv("TF_MOM_AUDIT_COLD") != null and cache.len == @as(usize, at)) {
@@ -237,9 +238,10 @@ pub fn save(ptr: *anyopaque, owner: ?*anyopaque, at: u32) anyerror!*anyopaque {
             const pc: *Copy = @ptrCast(@alignCast(sink.copy orelse continue));
             if (pc.at != at or pc.images.len != 0) continue;
             if (AdoptMap.buildParams(t.e.gpa, p.e.g, t.e.g, formatOf(t.e), at)) |dm| {
-                defer dm.free(t.e.gpa);
-                diffAudit(.{ .parent_copy = pc, .map = dm, .parent_layers = p.e.g.layers }, copy, true);
-            } else |_| {}
+                var dmm = dm;
+                defer dmm.free(t.e.gpa);
+                diffAudit(.{ .parent_copy = pc, .map = dmm, .parent_layers = p.e.g.layers }, copy, true);
+            }
             break :scan;
         }
     }
@@ -637,11 +639,9 @@ pub fn adoptMiss(ptr: *anyopaque, owner: ?*anyopaque, prompt: []const u32) anyer
     defer b.map.free(t.e.gpa);
     try adoptCache(t.e, cache, b.copy, &b.map);
     // arm the byte audit: the nested engine's next save of this prompt is the ground truth (diagnostic)
-    if (AdoptMap.buildParams(t.e.gpa, b.pe.g, t.e.g, formatOf(t.e), b.map.at)) |dm| audit = .{
-        .parent_copy = b.copy,
-        .map = dm,
-        .parent_layers = b.pe.g.layers,
-    } else |_| {}
+    if (AdoptMap.buildParams(t.e.gpa, b.pe.g, t.e.g, formatOf(t.e), b.map.at)) |dm| {
+        audit = .{ .parent_copy = b.copy, .map = dm, .parent_layers = b.pe.g.layers };
+    }
     std.log.warn("qwen3_5: adopted the paired engine's kept state at {d} tokens", .{b.map.at});
     return b.from;
 }
