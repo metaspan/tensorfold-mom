@@ -127,20 +127,15 @@ def main() -> int:
         kill(p)
     time.sleep(4)
 
-    # B. parent fills kept states; then nested with adoption on
-    p = boot({})
-    if p is None:
-        return 2
-    try:
-        _ = replay(BIG_NAME, user_turns, replies)  # parent prefills the same prefixes
-    finally:
-        kill(p)
-    time.sleep(4)
-
+    # B. ONE boot with adoption on: the parent fills kept states, then the nested lane
+    # replays in the SAME process (a restart would drop the parent's kept states).
+    # Adoption fires only on a cold nested miss: early turns self-hit the nested store,
+    # the longest prompt (last turn) is the adopt -- the 'adopted' log line proves it.
     p = boot({"TF_MOM_ADOPT": "1"})
     if p is None:
         return 2
     try:
+        _ = replay(BIG_NAME, user_turns, replies)  # parent prefills the same prefixes (fills the sink)
         adopt = replay(NESTED_NAME, user_turns, replies)
     finally:
         kill(p)
