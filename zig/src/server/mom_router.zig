@@ -35,8 +35,21 @@ pub const Lane = struct {
     }
 };
 
+/// v2 slot (docs/02): a pluggable classifier consulted only where the rules would
+/// pick the DEFAULT lane — the traffic the hot small model is missing. It may escalate
+/// borderline prompts to the trivial lane or hold the rules' choice; it can never
+/// override explicit or sticky. Abstain-by-hold keeps v1 behaviour byte-identical.
+/// Implementers own the brief's <5 ms budget (a 0.6B check is ~3 ms).
+pub const Classifier = struct {
+    ctx: *anyopaque,
+    classify: *const fn (ctx: *anyopaque, text: []const u8) Verdict,
+
+    pub const Verdict = enum { trivial, hold };
+};
+
 pub const Config = struct {
     lanes: []const Lane,
+    classifier: ?*Classifier = null,
     trivial_max_chars: usize = 240,
     sticky_enabled: bool = true,
     sticky_capacity: usize = 1024,
@@ -237,6 +250,21 @@ pub const Router = struct {
         const reason: []const u8 = if (trivialReason(text, self.cfg)) |r| blk: {
             chosen = self.trivialLane() orelse self.defaultLane() orelse 0;
             break :blk r;
+        } else if (self.cfg.classifier) |clf| blk: {
+            // Rules say default; ask the classifier whether this is really work.
+            // Empty text (tool-bearing requests per docs/07) is never classified.
+            if (text.len == 0) {
+                chosen = self.defaultLane() orelse 0;
+                break :blk "default";
+            }
+            if (clf.classify(clf.ctx, text) == .trivial) {
+                if (self.trivialLane()) |tl| {
+                    chosen = tl;
+                    break :blk "classifier:trivial";
+                }
+            }
+            chosen = self.defaultLane() orelse 0;
+            break :blk "classifier:hold";
         } else blk: {
             chosen = self.defaultLane() orelse 0;
             break :blk "default";
@@ -357,3 +385,53 @@ test "router: sticky LRU evicts the least recently used conversation" {
     try std.testing.expectEqual(@as(usize, 0), evicted.lane);
     try std.testing.expectEqualStrings("pattern:hello", evicted.reason);
 }
+
+// ---- classifier v2 slot (docs/02) -------------------------------------------
+
+const FakeClassifier = struct {
+    verdict: Classifier.Verdict,
+    seen: *[]const u8,
+
+    fn classify(ctx: *anyopaque, text: []const u8) Classifier.Verdict {
+        const self: *FakeClassifier = @ptrCast(@alignCast(ctx));
+        self.seen.* = text;
+        return self.verdict;
+    }
+};
+
+test "router: classifier slot escalates at the default branch only" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var seen: []const u8 = "";
+    var fake = FakeClassifier{ .verdict = .trivial, .seen = &seen };
+    var clf = Classifier{ .ctx = @ptrCast(&fake), .classify = FakeClassifier.classify };
+
+    var r = Router{ .cfg = .{ .lanes = twoLanes(), .sticky_enabled = false, .classifier = &clf }, .sticky = try Sticky.init(arena.allocator(), 8) };
+    // rules-default prompt: classifier escalates to the trivial lane
+    const d = try r.decide(null, "Implement a full compiler backend for x86-64 in Rust with register allocation", 1);
+    try std.testing.expectEqualStrings("classifier:trivial", d.reason);
+    try std.testing.expectEqual(@as(usize, 0), d.lane); // trivial lane index in twoLanes()
+    try std.testing.expectEqualStrings("Implement a full compiler backend for x86-64 in Rust with register allocation", seen);
+
+    // explicit bypasses the classifier
+    seen = "";
+    const e = try r.decide("big", "hello there", 2);
+    try std.testing.expectEqualStrings("explicit", e.reason);
+    try std.testing.expectEqualStrings("", seen);
+
+    // trivial rule hit bypasses the classifier (only the default branch consults it)
+    const t = try r.decide(null, "what is 2+2?", 3);
+    try std.testing.expectEqualStrings("short", t.reason);
+    try std.testing.expectEqualStrings("", seen);
+
+    // empty text (tool-bearing requests, docs/07) is never classified
+    const empty = try r.decide(null, "", 4);
+    try std.testing.expectEqualStrings("default", empty.reason);
+    try std.testing.expectEqualStrings("", seen);
+
+    // hold keeps the default lane, reason distinguishes the consulted path
+    fake.verdict = .hold;
+    const h = try r.decide(null, "Implement a full compiler backend for x86-64 in Rust with register allocation", 5);
+    try std.testing.expectEqualStrings("classifier:hold", h.reason);
+}
+
