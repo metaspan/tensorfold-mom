@@ -546,9 +546,19 @@ const Candidate = struct { from: u32, copy: *Copy, map: AdoptMap };
 pub fn adoptMiss(ptr: *anyopaque, owner: ?*anyopaque, prompt: []const u32) anyerror!?u32 {
     if (!adoptEnabled()) return null;
     const t: *Target = @ptrCast(@alignCast(ptr));
-    const s: *lanes.Stream = @ptrCast(@alignCast(owner orelse return null));
-    const cache = t.caches.get(s) orelse return null;
-    if (cache.len != 0 or cache.last != null) return null; // only a stream at its very start adopts
+    const s: ?*lanes.Stream = if (owner) |o| @ptrCast(@alignCast(o)) else null;
+    if (s == null) {
+        std.log.info("qwen3_5: adopt miss skipped: no stream owner", .{});
+        return null;
+    }
+    const cache = t.caches.get(s.?) orelse {
+        std.log.info("qwen3_5: adopt miss skipped: stream has no cache yet", .{});
+        return null;
+    };
+    if (cache.len != 0 or cache.last != null) {
+        std.log.info("qwen3_5: adopt miss skipped: cache not fresh (len {d})", .{cache.len});
+        return null;
+    }
     var best: ?Candidate = null;
     for (open_targets) |o| {
         const p = o orelse continue;
@@ -557,9 +567,18 @@ pub fn adoptMiss(ptr: *anyopaque, owner: ?*anyopaque, prompt: []const u32) anyer
         if (!sink.live) continue;
         const copy: *Copy = @ptrCast(@alignCast(sink.copy orelse continue));
         const at: usize = copy.at;
-        if (at + 1 > prompt.len or at + 1 > sink.tokens.len) continue;
-        if (!std.mem.eql(u32, sink.tokens[0 .. at + 1], prompt[0 .. at + 1])) continue; // the next token must agree too
-        const m = adoptable(p.e, t.e, copy, cache.cap) orelse continue;
+        if (at + 1 > prompt.len or at + 1 > sink.tokens.len) {
+            std.log.info("qwen3_5: adopt miss skipped: sink at {d} too deep for {d}-token prompt", .{ at, prompt.len });
+            continue;
+        }
+        if (!std.mem.eql(u32, sink.tokens[0 .. at + 1], prompt[0 .. at + 1])) {
+            std.log.info("qwen3_5: adopt miss skipped: token prefix mismatch at {d}", .{at});
+            continue;
+        }
+        const m = adoptable(p.e, t.e, copy, cache.cap) orelse {
+            std.log.info("qwen3_5: adopt miss skipped: adoptable refused (at {d})", .{at});
+            continue;
+        };
         if (best) |b| {
             if (m.at <= b.map.at) {
                 var mm = m;
