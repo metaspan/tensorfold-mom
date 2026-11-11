@@ -91,6 +91,13 @@ pub fn models(srv: *Server, conn: *Conn, a: Allocator) !void {
             if (!std.mem.eql(u8, lane.id, id)) continue;
             const mo = try json.newObject(a);
             try mo.put(a, "decisions", try json.intValue(a, m.decisionCount(li)));
+            if (li == 0) { // the router is process-wide: report decision latency once
+                const lat = m.decisionLatency();
+                if (lat.n > 0) {
+                    try mo.put(a, "decision_us_mean", try json.intValue(a, @as(u64, @intCast(lat.total_ns / lat.n / 1000))));
+                    try mo.put(a, "decision_us_max", try json.intValue(a, @as(u64, @intCast(lat.max_ns / 1000))));
+                }
+            }
             try mo.put(a, "role", .{ .string = m.laneRoleName(li) });
             if (m.hasIdlePolicy(li)) try mo.put(a, "state", .{ .string = m.laneStateName(li) });
             // Engine-owned memory from the lane's own accounting (brief component 7:

@@ -460,6 +460,15 @@ pub fn run(init: std.process.Init, argv: []const []const u8) !u8 {
         opened_n += 1;
         log.line("mom: {s} ({s}) loaded{s}", .{ h.spec.name, h.model_type, if (h.spec.pin) " (pinned)" else "" });
     }
+    // B5: qwen3_5 CUDA reprefills every conversation turn unless a family cache switch is set;
+    // the host store keeps message-start states only under TF_QWEN_REQUEST_STARTS=1 (device
+    // verified: 99.5% prefix reuse warm, TTFT 175->28 ms on the heavy lane). Say it once, here.
+    for (held[0..parsed.specs.len]) |h| {
+        if (!std.mem.startsWith(u8, h.model_type, "qwen3_5")) continue;
+        const core_profile = @import("core").profile;
+        if (core_profile.given(.TF_QWEN_REQUEST_STARTS) == null and core_profile.given(.TF_QWEN_KV_SHARE) == null)
+            log.line("mom: warning: {s} ({s}) has no conversation prefix cache on: set TF_QWEN_REQUEST_STARTS=1 (verified 99.5% reuse) — docs/09", .{ h.spec.name, h.model_type });
+    }
     const engine = opened[0].?;
     // B2: the routing registry — every opened engine is a lane; roles come from --lane
     // with a deterministic fallback (largest weights = default, smallest = trivial).

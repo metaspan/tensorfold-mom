@@ -49,6 +49,8 @@ pub const Registry = struct {
     /// reports them per advertised id. Capped by the router's lane limit.
     decision_counts: [16]u32 = @splat(0),
     decision_total: u64 = 0,
+    decision_ns_total: u64 = 0,
+    decision_ns_max: u64 = 0,
     /// Sleep/wake (docs/08): one lifecycle per lane; `idle_ns == 0` lanes are inert
     /// no-ops, so the default (sleep disabled) path pays only a bounds check.
     lifecycles: []mom_sleep.LaneLifecycle = &.{},
@@ -128,6 +130,10 @@ pub const Registry = struct {
         return switch (role) { .trivial => "trivial", .default_lane => "default", .other => "other" };
     }
 
+    pub fn decisionLatency(self: *const Registry) struct { total_ns: u64, max_ns: u64, n: u64 } {
+        return .{ .total_ns = self.decision_ns_total, .max_ns = self.decision_ns_max, .n = self.decision_total };
+    }
+
     pub fn decisionCount(self: *Registry, lane: usize) u32 {
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
@@ -138,12 +144,16 @@ pub const Registry = struct {
     /// is a hard refusal), else sticky, else trivial rules, else default lane.
     /// `model` is the raw request `model` string (null/empty = not asked).
     pub fn route(self: *Registry, a: std.mem.Allocator, model: ?[]const u8, body: json.Value) RouteErr!Decision {
+        const t0 = @import("clock.zig").nowNs(self.io);
         const has_tools = body.get("tools") != null or body.get("functions") != null;
         const text: []const u8 = if (has_tools) "" else try lastUserText(a, body);
         const ck = convKey(body);
         self.mutex.lockUncancelable(self.io);
         defer self.mutex.unlock(self.io);
         const d = try self.router.decide(model, text, ck);
+        const ns: u64 = @intCast(@import("clock.zig").nowNs(self.io) - t0); // the routing decision itself, pre-log (brief: <5 ms)
+        self.decision_ns_total += ns;
+        self.decision_ns_max = @max(self.decision_ns_max, ns);
         if (d.lane < self.decision_counts.len) self.decision_counts[d.lane] += 1;
         self.decision_total += 1;
         if (self.log_file) |f| self.logDecision(f, model, d);
@@ -285,6 +295,9 @@ test "registry: route counts decisions per lane" {
     try std.testing.expectEqual(@as(u32, 2), reg.decisionCount(0));
     try std.testing.expectEqual(@as(u32, 1), reg.decisionCount(1));
     try std.testing.expectEqual(@as(u64, 3), reg.decision_total);
+    const lat = reg.decisionLatency();
+    try std.testing.expectEqual(@as(u64, 3), lat.n);
+    try std.testing.expect(lat.total_ns > 0 and lat.max_ns > 0 and lat.max_ns <= lat.total_ns);
     try std.testing.expectEqualStrings("trivial", reg.laneRoleName(0));
     try std.testing.expectEqualStrings("default", reg.laneRoleName(1));
 }
