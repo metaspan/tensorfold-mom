@@ -260,6 +260,17 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
     shard_tests.addImport("living", mods.living);
     b.step("test-living-shards-host", "Quantized save and reopen through actual shard writer").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = shard_tests })).step);
     @import("cuda_contract_host.zig").steps(b, host, cuda, mods, step);
+    // docs/13 M3: cross-engine adoption arithmetic (the nested upcycle's shared-cache writer)
+    const adopt_root = b.createModule(.{ .root_source_file = b.path("zig/src/families/qwen3_5/cuda_reuse.zig"), .target = host, .optimize = .debug, .link_libc = true });
+    adopt_root.addImport("cuda", cuda);
+    adopt_root.addImport("core", mods.core);
+    adopt_root.addImport("lanes", mods.lanes);
+    adopt_root.addImport("qwen35_layers", b.createModule(.{ .root_source_file = b.path("zig/src/core/qwen35_layers.zig"), .target = host, .optimize = .debug }));
+    adopt_root.addImport("qwen35_rules", b.createModule(.{ .root_source_file = b.path("zig/src/core/qwen35_rules.zig"), .target = host, .optimize = .debug }));
+    adopt_root.addImport("kvdump_format", b.createModule(.{ .root_source_file = b.path("zig/src/families/qwen3_5/kvdump_format.zig"), .target = host, .optimize = .debug }));
+    const adopt_tests = b.addRunArtifact(b.addTest(.{ .root_module = adopt_root, .filters = &.{"adoption map"} }));
+    b.step("test-mom-adopt-host", "Nested-upcycle adoption map arithmetic without a GPU").dependOn(&adopt_tests.step);
+    step.dependOn(&adopt_tests.step);
     const bolt = b.step("test-bolt-host", "Nemotron Bolt and shared lane host contracts");
     const cuda_target = b.resolveTargetQuery(.{ .cpu_arch = host.result.cpu.arch, .os_tag = .linux, .abi = .gnu });
     const check_cuda = runtime(b, cuda_target, .debug, &.{});

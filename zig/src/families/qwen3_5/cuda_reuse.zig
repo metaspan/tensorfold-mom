@@ -349,6 +349,176 @@ pub fn dropCopy(e: *Engine, copy: *Copy) void {
     e.gpa.destroy(copy);
 }
 
+/// Cross-engine adoption (docs/13 M3 v1): a parent engine's kept state, saved
+/// at `at`, re-laid into a nested engine's cache -- legal only where the two
+/// engines are byte-identical (the nested checkpoint is a byte-copy of the
+/// parent's layer prefix; the open-time weight check is the gate, not this).
+/// The parent copy stores contiguous pieces in parent piece order; adoption
+/// reads the prefix subset (state regions of the shared linear layers, then
+/// the shared attention layers' kv pieces) and writes each through the
+/// nested cache's own Runs/pageCopies addressing.
+pub const AdoptMap = struct {
+    /// One write: `src` bytes into the parent copy, `piece` index in the nested layout.
+    pub const Write = struct { src: usize, len: usize, piece: usize };
+    writes: []const Write,
+    at: usize,
+
+    /// The subset map over plain values (host-testable), or null where the
+    /// geometries are not parent-prefix-identical: same format and kv_heads,
+    /// the nested's layer kinds are the parent's first ones verbatim, state
+    /// regions uniform and equal-sized.
+    pub fn buildParams(gpa: std.mem.Allocator, pg: Geometry, ng: Geometry, fmt: Format, at: usize) ?AdoptMap {
+        if (pg.kv_heads != ng.kv_heads) return null;
+        if (ng.layers > pg.layers) return null;
+        if (ng.deltas() > pg.deltas() or ng.attentions() > pg.attentions()) return null;
+        for (0..ng.layers) |i| if (ng.linear[i] != pg.linear[i]) return null;
+        const dn = ng.deltas();
+        const dp = pg.deltas();
+        if (dn == 0 or dp == 0) return null;
+        if (pg.stateBytes() % dp != 0) return null;
+        const region = pg.stateBytes() / dp;
+        if (ng.stateBytes() != dn * region) return null;
+        const pl: Layout = .{ .g = pg, .format = fmt, .cap = 0, .at = at };
+        const nl: Layout = .{ .g = ng, .format = fmt, .cap = 0, .at = at };
+        var w = std.ArrayList(Write).initCapacity(gpa, nl.count()) catch return null;
+        w.appendAssumeCapacity(.{ .src = 0, .len = dn * region, .piece = 0 });
+        var off: usize = pg.stateBytes(); // pieces after 0 lie past the state block
+        for (1..nl.count()) |i| {
+            const np = nl.piece(i);
+            w.appendAssumeCapacity(.{ .src = off, .len = np.len, .piece = i });
+            off += pl.piece(i).len; // same format/at/heads: parent's piece i has the same length
+        }
+        return .{ .writes = w.items, .at = at };
+    }
+
+    /// The engine pair's convenience: same format required, geometries from the engines.
+    pub fn build(pe: *const Engine, ne: *const Engine, at: usize, cap_n: usize) ?AdoptMap {
+        if (formatOf(pe) != formatOf(ne)) return null;
+        _ = cap_n; // the nested cache sizes its own pieces; the map is addressing-independent
+        return buildParams(ne.gpa, pe.g, ne.g, formatOf(ne), at);
+    }
+
+    pub fn free(m: *AdoptMap, gpa: std.mem.Allocator) void {
+        gpa.free(m.writes);
+        m.* = undefined;
+    }
+};
+
+/// The parent copy can seed `cache` in the nested engine.
+pub fn adoptable(pe: *const Engine, ne: *const Engine, copy: *const Copy, cap_n: usize) ?AdoptMap {
+    if (copy.images.len != 0) return null; // v1 adopts text-only prefixes
+    if (copy.at == 0 or copy.at >= cap_n) return null;
+    const m = AdoptMap.build(pe, ne, copy.at, cap_n) orelse return null;
+    var need: usize = 0;
+    for (m.writes) |w| need = @max(need, w.src + w.len);
+    if (need > copy.room()) {
+        var mm = m;
+        mm.free(ne.gpa);
+        return null;
+    }
+    return m;
+}
+
+/// Write the adopted bytes into `cache` and make it stand at `at`, exactly as
+/// a same-engine restore would. The parent copy is NOT owned here: it stays
+/// in the parent's reuse store and may still be restored by its own engine.
+pub fn adoptCache(ne: *Engine, cache: *Cache, copy: *Copy, m: *const AdoptMap) !void {
+    const l: Layout = .{ .g = ne.g, .format = copy.format, .cap = cache.cap, .at = m.at };
+    if (l.count() != m.writes.len or m.writes.len == 0) return error.BadAdoption;
+    copy.reading = true;
+    errdefer if (ne.stream.synchronize()) |_| {
+        copy.reading = false;
+    } else |_| std.log.warn("qwen3_5: a failed adopt's stream did not drain: the parent copy stays", .{});
+    // the state block, piece by piece (never paged)
+    {
+        const p0 = l.piece(0);
+        var it = Runs.of(cache, l, 0, p0);
+        while (it.next()) |r| {
+            const s, const o = .{ ne.stream.handle, m.writes[0].src + r.at };
+            if (copy.dev) |b|
+                try ne.d.check(ne.d.api.cuMemcpyDtoDAsync_v2(r.dev, b.ptr + o, r.len, s), "cuMemcpyDtoDAsync")
+            else
+                try ne.d.check(ne.d.api.cuMemcpyHtoDAsync_v2(r.dev, copy.host.bytes.ptr + o, r.len, s), "cuMemcpyHtoDAsync");
+        }
+    }
+    if (wholePages(cache, l)) {
+        // bf16 pages: one 2D copy a page over every kv piece at once -- pageCopies'
+        // restore branch with the kept side read at the parent copy's kv offset
+        const kv_off = m.writes[1].src;
+        const pg = cache.paged.?;
+        const row = head_dim * 2;
+        const page_bytes = (Layout{ .g = l.g, .format = l.format, .cap = pg.tokens, .at = pg.tokens }).kvBytes();
+        const pieces = l.count() - 1;
+        var p: usize = 0;
+        while (p * pg.tokens < l.at) : (p += 1) {
+            const rows = @min(pg.tokens, l.at - p * pg.tokens);
+            const dev = pg.base + pg.ids[p] * page_bytes;
+            const o = kv_off + p * pg.tokens * row;
+            const kept: cuda.abi.DevicePtr = if (copy.dev) |b| b.ptr + o else 0;
+            const host: ?*u8 = if (copy.dev == null) &copy.host.bytes.ptr[o] else null;
+            const kind: c_int = @intCast(if (copy.dev == null) cuda.abi.memory_type_host else cuda.abi.memory_type_device);
+            const m2: cuda.abi.Memcpy2D = .{
+                .src_type = kind, .src_host = host, .src = kept, .src_pitch = l.at * row,
+                .dst = dev, .dst_pitch = pg.tokens * row, .width = rows * row, .height = pieces,
+            };
+            try ne.d.check(ne.d.api.cuMemcpy2DAsync_v2(&m2, ne.stream.handle), "cuMemcpy2DAsync");
+        }
+    } else for (m.writes[1..], 1..) |w, j| {
+        const i = j + 1;
+        const p = l.piece(i);
+        var it = Runs.of(cache, l, i, p);
+        while (it.next()) |r| {
+            const s, const o = .{ ne.stream.handle, w.src + r.at };
+            if (copy.dev) |b|
+                try ne.d.check(ne.d.api.cuMemcpyDtoDAsync_v2(r.dev, b.ptr + o, r.len, s), "cuMemcpyDtoDAsync")
+            else
+                try ne.d.check(ne.d.api.cuMemcpyHtoDAsync_v2(r.dev, copy.host.bytes.ptr + o, r.len, s), "cuMemcpyHtoDAsync");
+        }
+    }
+    try ne.stream.synchronize();
+    copy.reading = false;
+    cache.len = m.at;
+    cache.written = m.at;
+    cache.last = null;
+    cache.pend = 0;
+    cache.delta = copy.delta;
+}
+
+test "adoption map: the nested prefix takes the state head and the parent's first kv pieces" {
+    const gpa = std.testing.allocator;
+    const testing = std.testing;
+    const pg = testGeometry(8, 4, 2); // attention at 3,7; six linear layers
+    const ng = testGeometry(4, 4, 2); // attention at 3; three linear layers: the parent's first layers
+    var m = AdoptMap.buildParams(gpa, pg, ng, .bf16, 5) orelse return error.TestUnexpectedResult;
+    defer m.free(gpa);
+    const nl: Layout = .{ .g = ng, .format = .bf16, .cap = 0, .at = 5 };
+    try testing.expectEqual(nl.count(), m.writes.len);
+    try testing.expectEqual(@as(usize, 0), m.writes[0].src);
+    try testing.expectEqual(ng.deltas() * (pg.stateBytes() / pg.deltas()), m.writes[0].len);
+    var off: usize = pg.stateBytes();
+    for (m.writes[1..], 1..) |w, i| {
+        try testing.expectEqual(off, w.src);
+        try testing.expectEqual(nl.piece(i).len, w.len);
+        try testing.expectEqual(i, w.piece);
+        off += w.len;
+    }
+}
+
+test "adoption map: refuses different heads, longer nested, and mismatched layer kinds" {
+    const gpa = std.testing.allocator;
+    const testing = std.testing;
+    const pg = testGeometry(8, 4, 2);
+    const heads = testGeometry(4, 4, 4);
+    try testing.expect(AdoptMap.buildParams(gpa, pg, heads, .bf16, 5) == null);
+    const longer = testGeometry(16, 4, 2);
+    try testing.expect(AdoptMap.buildParams(gpa, pg, longer, .bf16, 5) == null);
+    var kinds = testGeometry(4, 4, 2);
+    kinds.linear[3] = true; // the parent's layer 3 is an attention layer
+    try testing.expect(AdoptMap.buildParams(gpa, pg, kinds, .bf16, 5) == null);
+    const dense = testGeometry(4, 1, 2); // all-attention parent slice: no linear layers to adopt
+    try testing.expect(AdoptMap.buildParams(gpa, pg, dense, .bf16, 5) == null);
+}
+
 fn testGeometry(layers: usize, attention_every: usize, kv_heads: usize) Geometry {
     var g: Geometry = undefined;
     g.hidden = 5120;
