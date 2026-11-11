@@ -23,6 +23,7 @@ pub const snap_bytes = native.snap_bytes;
 pub const snap_save = native.snap_save;
 pub const snap_restore = native.snap_restore;
 pub const snap_drop = native.snap_drop;
+pub const snap_adopt_miss = native.snap_adopt_miss; // MoM M3 (docs/13): @hasDecl must see it HERE too -- the MoE module is the serving family
 pub const snap_host = native.snap_host;
 pub const snap_lookahead = native.snap_lookahead;
 pub const snap_grid = native.snap_grid;
