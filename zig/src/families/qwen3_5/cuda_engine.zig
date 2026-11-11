@@ -217,7 +217,12 @@ pub const Engine = struct {
         e.rec_scratch = recurrent.Pool.init(gpa, @intFromPtr(e));
         e.n_taps = 0;
         e.features = 0;
-        e.stream = try cuda.Stream.init(d, true);
+        // MoM --lane-priority: the trivial lane's engine opens pre-emptive (setenv window
+        // around its open only, mom_main); other lanes keep the default stream.
+        e.stream = if (std.c.getenv("TF_MOM_TRIVIAL_PRIORITY")) |v| blk: {
+            if (std.mem.eql(u8, std.mem.span(v), "1")) break :blk try cuda.Stream.initPriority(d, .highest);
+            break :blk try cuda.Stream.init(d, true);
+        } else try cuda.Stream.init(d, true);
         errdefer e.stream.deinit();
         var ck = try core.Checkpoint.openModel(gpa, io, dir);
         defer core.checkpoint.cache.close(&ck);

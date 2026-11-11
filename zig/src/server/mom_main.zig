@@ -146,6 +146,9 @@ fn openDecisionLog(io: std.Io, path: []const u8) !std.Io.File {
 
 /// The parsed model specs and the argv with every mom-only flag removed (cli.parse sees the rest).
 pub const Parsed = struct {
+    /// --lane-priority: the trivial lane's engine opens its CUDA stream at .highest
+    /// priority so its kernels preempt the heavy lane's under contention (docs/03 B4 note).
+    lane_priority: bool = false,
     specs: []Spec,
     rest: []const []const u8,
     mom_log: ?[]const u8 = null,
@@ -173,6 +176,7 @@ pub fn parseSpecs(a: std.mem.Allocator, argv: []const []const u8, problem: *[]co
     }.one;
     var mom_log: ?[]const u8 = null;
     var no_sticky = false;
+    var lane_priority = false;
     var lane_idle: i64 = 0;
     var i: usize = 0;
     while (i < argv.len) : (i += 1) {
@@ -192,6 +196,10 @@ pub fn parseSpecs(a: std.mem.Allocator, argv: []const []const u8, problem: *[]co
             }
             lane_idle = secs;
             i += 1;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--lane-priority")) {
+            lane_priority = true;
             continue;
         }
         if (std.mem.eql(u8, arg, "--no-sticky")) {
@@ -265,7 +273,7 @@ pub fn parseSpecs(a: std.mem.Allocator, argv: []const []const u8, problem: *[]co
             return null;
         }
     };
-    return .{ .specs = specs.items, .rest = rest.items, .mom_log = mom_log, .no_sticky = no_sticky, .lane_idle_s = lane_idle };
+    return .{ .specs = specs.items, .rest = rest.items, .mom_log = mom_log, .no_sticky = no_sticky, .lane_priority = lane_priority, .lane_idle_s = lane_idle };
 }
 
 /// A refusal for flags the mom path has no per-model story for yet (B3-B5): the message says which stage brings them.
@@ -279,6 +287,28 @@ pub fn momRefusal(args: cli.Args) ?[]const u8 {
 }
 
 /// Weight bytes of a checkpoint folder: the tensors a load will page in (sizes on disk are the plan's estimate).
+/// The lane whose engine should open its CUDA stream at .highest priority: the
+/// explicit trivial spec, else (roles falling back to weights) the lightest model.
+/// Null for one lane: nothing to preempt. Mirrors the registry's role assignment.
+fn priorityIndex(specs: []const Spec, weights: []const u64) ?usize {
+    if (specs.len < 2) return null;
+    for (specs, 0..) |sp, i| if (std.mem.eql(u8, sp.lane, "trivial")) return i;
+    var heavy: usize = 0;
+    var light: usize = 0;
+    for (weights, 0..) |w, i| {
+        if (w > weights[heavy]) heavy = i;
+        if (w < weights[light]) light = i;
+    }
+    return if (heavy != light) light else null;
+}
+
+// This std exposes getenv but not setenv; the priority env window needs libc directly.
+extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+extern "c" fn unsetenv(name: [*:0]const u8) c_int;
+fn clearTrivialPriority() void {
+    _ = unsetenv("TF_MOM_TRIVIAL_PRIORITY");
+}
+
 fn weightsBytes(a: std.mem.Allocator, io: std.Io, dir: []const u8) !u64 {
     const exts = [_][]const u8{ ".safetensors", ".gguf", ".msgpack", ".bin" };
     _ = a;
@@ -434,7 +464,19 @@ pub fn run(init: std.process.Init, argv: []const []const u8) !u8 {
     defer text_arena.deinit();
     var text_problem: []const u8 = "";
     var default_text: ?*hf_text.HfText = null;
+    // --lane-priority: open exactly one engine (the trivial one) while the env names
+    // the stream priority; cuda_engine reads it at its single stream-creation site.
+    const prio_idx = if (parsed.lane_priority) blk: {
+        const wts = try a.alloc(u64, parsed.specs.len);
+        for (plans[0..parsed.specs.len], 0..) |mp, wi| wts[wi] = mp.weights;
+        break :blk priorityIndex(parsed.specs, wts);
+    } else null;
     for (held[0..parsed.specs.len], 0..) |h, i| {
+        const prio_here = prio_idx != null and i == prio_idx.?;
+        if (prio_here) {
+            _ = setenv("TF_MOM_TRIVIAL_PRIORITY", "1", 1);
+            defer clearTrivialPriority();
+        }
         const got: ?api.Opened = if (i == 0) blk: {
             const up = startup.both(io, loadText, .{ gpa, io, h.dir, args.chat_template, text_arena.allocator(), &text_problem }, engines.open, .{ a, gpa, io, h.dir, h.model_type, args, &problem }) catch |e| {
                 if (text_problem.len > 0) {
@@ -615,6 +657,23 @@ test "parseSpecs takes the mom groups and hands everything else to cli.parse" {
         try std.testing.expect(!std.mem.eql(u8, r, "--lane"));
         try std.testing.expect(!std.mem.eql(u8, r, "--pin"));
     }
+}
+
+test "priorityIndex picks the explicit trivial, else the lightest, else none" {
+    const S = Spec;
+    const specs = [_]S{
+        .{ .model = "big", .name = "big", .lane = "default" },
+        .{ .model = "small", .name = "small", .lane = "trivial" },
+    };
+    try std.testing.expectEqual(@as(?usize, 1), priorityIndex(&specs, &.{ 900, 100 }));
+    const unlabeled = [_]S{
+        .{ .model = "a", .name = "a" },
+        .{ .model = "b", .name = "b" },
+    };
+    try std.testing.expectEqual(@as(?usize, 1), priorityIndex(&unlabeled, &.{ 900, 100 }));
+    try std.testing.expectEqual(@as(?usize, 0), priorityIndex(&unlabeled, &.{ 100, 900 }));
+    try std.testing.expectEqual(@as(?usize, null), priorityIndex(unlabeled[0..1], &.{ 100 })); // one lane: nothing to preempt
+    try std.testing.expectEqual(@as(?usize, null), priorityIndex(&unlabeled, &.{ 500, 500 })); // tie: no clear trivial
 }
 
 test "parseSpecs refuses: no models, a nameless model, and duplicate names" {
