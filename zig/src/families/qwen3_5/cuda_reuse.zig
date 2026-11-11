@@ -513,6 +513,68 @@ pub fn adoptCache(ne: *Engine, cache: *Cache, copy: *Copy, m: *const AdoptMap) !
     cache.delta = copy.delta;
 }
 
+// ---- MoM M3: the cross-engine adoption trigger (docs/13) ----
+
+/// Live qwen3_5 lane targets (registered by cuda_native.zig); the pair is found at adopt time, never wired at open.
+var open_targets: [4]?*Target = .{ null, null, null, null };
+
+pub fn register(t: *Target) void {
+    for (&open_targets) |*slot| if (slot.* == null) {
+        slot.* = t;
+        return;
+    };
+}
+
+pub fn unregister(t: *Target) void {
+    for (&open_targets) |*slot| if (slot.* == t) {
+        slot.* = null;
+    };
+}
+
+/// TF_MOM_ADOPT: the trigger is on for every qwen3_5 target; roles (parent vs nested) are decided per call by layer count.
+pub fn adoptEnabled() bool {
+    return std.c.getenv("TF_MOM_ADOPT") != null;
+}
+
+const Candidate = struct { from: u32, copy: *Copy, map: AdoptMap };
+
+/// The core's cold-miss path (prompt_cache.beginUser) asks: does a registered, deeper engine keep this prompt's
+/// prefix? Takes the deepest candidate whose kept copy passes `adoptable` (same family shape, text-only, fits).
+pub fn adoptMiss(ptr: *anyopaque, owner: ?*anyopaque, prompt: []const u32) anyerror!?u32 {
+    if (!adoptEnabled()) return null;
+    const t: *Target = @ptrCast(@alignCast(ptr));
+    const s: *lanes.Stream = @ptrCast(@alignCast(owner orelse return null));
+    const cache = t.caches.get(s) orelse return null;
+    if (cache.len != 0 or cache.last != null) return null; // only a stream at its very start adopts
+    var best: ?Candidate = null;
+    for (open_targets) |o| {
+        const p = o orelse continue;
+        if (p == t or p.e.g.layers <= t.e.g.layers) continue; // the parent is the deeper stack
+        const sink = p.adopt_sink orelse continue;
+        if (!sink.live) continue;
+        const copy: *Copy = @ptrCast(@alignCast(sink.copy orelse continue));
+        const at: usize = copy.at;
+        if (at + 1 > prompt.len or at + 1 > sink.tokens.len) continue;
+        if (!std.mem.eql(u32, sink.tokens[0 .. at + 1], prompt[0 .. at + 1])) continue; // the next token must agree too
+        const m = adoptable(p.e, t.e, copy, cache.cap) orelse continue;
+        if (best) |b| {
+            if (m.at <= b.map.at) {
+                var mm = m;
+                mm.free(t.e.gpa);
+                continue;
+            }
+            var old = b;
+            old.map.free(t.e.gpa);
+        }
+        best = .{ .from = @intCast(m.at), .copy = copy, .map = m };
+    }
+    var b = best orelse return null;
+    defer b.map.free(t.e.gpa);
+    try adoptCache(t.e, cache, b.copy, &b.map);
+    std.log.warn("qwen3_5: adopted the paired engine's kept state at {d} tokens", .{b.map.at});
+    return b.from;
+}
+
 test "adoption map: the nested prefix takes the state head and the parent's first kv pieces" {
     const gpa = std.testing.allocator;
     const testing = std.testing;

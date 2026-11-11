@@ -61,6 +61,7 @@ pub fn Snaps(comptime F: type, comptime image: ?*const api.prompt_cache.rows.Ima
             .charged = if (@hasDecl(F, "snap_charged")) F.snap_charged else null,
             .spare = if (@hasDecl(F, "snap_spare")) F.snap_spare else null,
             .reuses = if (@hasDecl(F, "snap_reuses")) F.snap_reuses else null,
+            .adopt_miss = if (@hasDecl(F, "snap_adopt_miss")) F.snap_adopt_miss else null,
         };
     };
 }

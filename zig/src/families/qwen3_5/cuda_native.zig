@@ -50,6 +50,7 @@ pub const snap_bytes = reuse.bytes;
 pub const snap_save = reuse.save;
 pub const snap_restore = reuse.restore;
 pub const snap_drop = reuse.drop;
+pub const snap_adopt_miss = reuse.adoptMiss; // MoM M3 (docs/13): cross-engine adoption on a cold miss
 pub const snap_host = true;
 pub const snap_lookahead: u32 = 0;
 pub const snap_grid: u32 = E.max_rows;
@@ -200,6 +201,8 @@ pub fn openLanes(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, d
     const l = try gpa.create(Lanes);
     l.* = .{ .gpa = gpa, .io = io, .e = e, .capacity = o.context, .page_tokens = page_tokens, .engine_paged = engine_paged, .page_test = page_test, .share_snaps = share_snaps, .cost_context = ctx, .startup = e.startup, .vision = v, .target = undefined, .timing_on = timing_on, .trace = trace };
     l.target = .{ .e = e, .caches = &l.caches, .seen = &l.seen, .device = try ctx.attribute(.integrated) != 0, .io = io };
+    reuse.register(&l.target); // MoM M3 (docs/13): a candidate pair member for the whole life of the lanes
+    if (reuse.adoptEnabled()) l.target.adopt_sink = &l.adopt_rec;
     return .{
         .learns = if (o.slide) e else null,
         .learn_bytes = if (o.slide) @import("cuda_train.zig").memory(try @import("cuda_learn_shape.zig").from(e.g)) + e.streamBytes(o.context) else 0,
@@ -295,6 +298,8 @@ pub const Lanes = struct {
     /// --vision's tower: an image prompt's images encoded at its prefill.
     vision: ?*vision.Vision = null,
     target: reuse.Target,
+    /// MoM M3 (docs/13): this lane's record for its paired engine (set on both sides under TF_MOM_ADOPT).
+    adopt_rec: reuse.AdoptSink = .{},
     caches: std.AutoHashMapUnmanaged(*lanes.Stream, *E.Cache) = .empty,
     /// An image prompt's images as its kept states name them (cuda_reuse.zig), from its prefill to its release.
     seen: std.AutoHashMapUnmanaged(*lanes.Stream, []reuse.Seen) = .empty,
@@ -308,6 +313,7 @@ pub const Lanes = struct {
     readout: readout.Side = .{},
 
     fn deinit(self: *Lanes) void {
+        reuse.unregister(&self.target); // MoM M3: out of the pair registry before anything it could be adopted from goes
         self.readout.deinit(self.gpa, self.e); // drained and closed before any cache a pending piece writes goes
         var it = self.caches.valueIterator();
         while (it.next()) |cache| self.give(cache.*); // a pool lane's pages back, a window to the reserve

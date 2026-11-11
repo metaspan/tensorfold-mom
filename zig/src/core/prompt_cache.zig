@@ -29,6 +29,10 @@ pub const Snapshots = struct {
         /// Make the live state `saved`'s: the next prompt chunk starts at its position.
         restore: *const fn (ptr: *anyopaque, owner: ?*anyopaque, saved: Saved) anyerror!void,
         drop: *const fn (ptr: *anyopaque, saved: Saved) void,
+        /// MoM M3 (docs/13): the family's miss-path hook -- when no kept state of its own resumed, a paired,
+        /// deeper engine (the nested upcycle) may hold this prompt's kept prefix: write it into the stream's
+        /// cache and return the row it resumes at (null: nothing to adopt). Only asked on a cold miss.
+        adopt_miss: ?*const fn (ptr: *anyopaque, owner: ?*anyopaque, prompt: []const u32) anyerror!?u32 = null,
         /// The storage a kept state holds: new storage up to `bytes`, or the spare storage it took (null: `bytes`).
         charged: ?*const fn (ptr: *anyopaque, saved: Saved) u64 = null,
         /// Free storage the family keeps for later saves, inside the budget (null: none).
@@ -277,6 +281,15 @@ pub const Store = struct {
         }
         const marks_ = fresh_marks orelse l.marks;
         if (fresh_marks != null and l.marks.ptr != marks_.ptr) a.free(l.marks);
+        // MoM M3 (docs/13): nothing of ours resumed -- a paired deeper engine's kept prefix may serve (the nested upcycle).
+        if (s.family.vtable.adopt_miss) |f| {
+            if (f(s.family.ptr, owner, prompt)) |hit| {
+                if (hit) |from| {
+                    s.reserve(prompt, @intCast(prompt.len), null, marks_, spans, @import("prompt_cache_reserve.zig").endpointFor(s, prompt, from, history_len, starts, spans));
+                    return .{ .from = from, .marks = marks_ };
+                }
+            } else |_| {}
+        }
         s.reserve(prompt, @intCast(prompt.len), null, marks_, spans, @import("prompt_cache_reserve.zig").endpointFor(s, prompt, 0, history_len, starts, spans));
         return .{ .marks = marks_ };
     }
