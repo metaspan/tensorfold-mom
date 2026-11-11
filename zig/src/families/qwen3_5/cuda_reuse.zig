@@ -219,7 +219,30 @@ pub fn save(ptr: *anyopaque, owner: ?*anyopaque, at: u32) anyerror!*anyopaque {
     const t: *Target = @ptrCast(@alignCast(ptr));
     const s: *lanes.Stream = @ptrCast(@alignCast(owner orelse return error.NoStream));
     const cache = t.caches.get(s) orelse return error.UnknownStream;
-    const copy = try saveCache(t.e, cache, at, t.seen.get(s) orelse &.{}, t.device and t.ctx == null);
+    // MoM M3 diagnostic: TF_MOM_ADOPT_HOST keeps the records host-readable for the byte audit.
+    const keep_host = adoptEnabled() and std.c.getenv("TF_MOM_ADOPT_HOST") != null;
+    const copy = try saveCache(t.e, cache, at, t.seen.get(s) orelse &.{}, t.device and t.ctx == null and !keep_host);
+    // the audit fires either after an adoption (kv pieces only: the state block was resumed and mutated)
+    // or, when TF_MOM_AUDIT_COLD is set, on this engine's own cold save (no resume: the state block is
+    // byte-fresh, so a match proves the map copies exactly what the engine itself writes).
+    if (takeAudit()) |a| {
+        defer a.map.free(t.e.gpa);
+        if (t.e.g.layers < a.parent_layers) diffAudit(a, copy, false);
+    } else if (keep_host and std.c.getenv("TF_MOM_AUDIT_COLD") != null and cache.len == @as(usize, at)) {
+        scan: for (open_targets) |o| {
+            const p = o orelse continue;
+            if (p == t or p.e.g.layers <= t.e.g.layers) continue;
+            const sink = p.adopt_sink orelse continue;
+            if (!sink.live) continue;
+            const pc: *Copy = @ptrCast(@alignCast(sink.copy orelse continue));
+            if (pc.at != at or pc.images.len != 0) continue;
+            if (AdoptMap.buildParams(t.e.gpa, p.e.g, t.e.g, formatOf(t.e), at)) |dm| {
+                defer dm.free(t.e.gpa);
+                diffAudit(.{ .parent_copy = pc, .map = dm, .parent_layers = p.e.g.layers }, copy, true);
+            } else |_| {}
+            break :scan;
+        }
+    }
     // MoM M3 (docs/13): the paired thin engine adopts from this record; a bookkeeping OOM just keeps the previous record.
     if (t.adopt_sink) |sink| {
         sink.record(t.e.gpa, copy, at, s.prompt()) catch {};
@@ -521,6 +544,25 @@ pub fn adoptCache(ne: *Engine, cache: *Cache, copy: *Copy, m: *const AdoptMap) !
 /// Live qwen3_5 lane targets (registered by cuda_native.zig); the pair is found at adopt time, never wired at open.
 var open_targets: [4]?*Target = .{ null, null, null, null };
 
+/// The adoption's byte audit (diagnostic): the adopted parent copy and its map, awaiting the nested
+/// engine's own save of the same prompt, which is the ground truth of what the engine would have
+/// written. KV rows are immutable once written, so the adopted kv pieces must match bit for bit; the
+/// state block is mutated by every forward and is judged only by elimination. Set by `adoptMiss`,
+/// consumed by the next save on the nested target. TF_MOM_ADOPT_HOST keeps saves host-backed so the
+/// bytes are readable.
+pub const AdoptAudit = struct {
+    parent_copy: *Copy,
+    map: AdoptMap,
+    parent_layers: usize,
+};
+var audit: ?AdoptAudit = null;
+
+pub fn takeAudit() ?AdoptAudit {
+    const a = audit;
+    audit = null;
+    return a;
+}
+
 pub fn register(t: *Target) void {
     for (&open_targets) |*slot| if (slot.* == null) {
         slot.* = t;
@@ -539,12 +581,13 @@ pub fn adoptEnabled() bool {
     return std.c.getenv("TF_MOM_ADOPT") != null;
 }
 
-const Candidate = struct { from: u32, copy: *Copy, map: AdoptMap };
+const Candidate = struct { from: u32, copy: *Copy, map: AdoptMap, pe: *const Engine };
 
 /// The core's cold-miss path (prompt_cache.beginUser) asks: does a registered, deeper engine keep this prompt's
 /// prefix? Takes the deepest candidate whose kept copy passes `adoptable` (same family shape, text-only, fits).
 pub fn adoptMiss(ptr: *anyopaque, owner: ?*anyopaque, prompt: []const u32) anyerror!?u32 {
     if (!adoptEnabled()) return null;
+    if (std.c.getenv("TF_MOM_ADOPT_AUDIT") != null) return null; // audit-only boots: the sink and host copies stay, the adopt does not
     const t: *Target = @ptrCast(@alignCast(ptr));
     const s: ?*lanes.Stream = if (owner) |o| @ptrCast(@alignCast(o)) else null;
     if (s == null) {
@@ -588,13 +631,45 @@ pub fn adoptMiss(ptr: *anyopaque, owner: ?*anyopaque, prompt: []const u32) anyer
             var old = b;
             old.map.free(t.e.gpa);
         }
-        best = .{ .from = @intCast(m.at), .copy = copy, .map = m };
+        best = .{ .from = @intCast(m.at), .copy = copy, .map = m, .pe = p.e };
     }
     var b = best orelse return null;
     defer b.map.free(t.e.gpa);
     try adoptCache(t.e, cache, b.copy, &b.map);
+    // arm the byte audit: the nested engine's next save of this prompt is the ground truth (diagnostic)
+    if (AdoptMap.buildParams(t.e.gpa, b.pe.g, t.e.g, formatOf(t.e), b.map.at)) |dm| audit = .{
+        .parent_copy = b.copy,
+        .map = dm,
+        .parent_layers = b.pe.g.layers,
+    } else |_| {}
     std.log.warn("qwen3_5: adopted the paired engine's kept state at {d} tokens", .{b.map.at});
     return b.from;
+}
+
+/// Compare an adopted parent copy against the nested engine's own save of the same prompt, piece by
+/// piece. KV rows are immutable, so an adopted kv piece must be bit-identical to what the engine
+/// itself writes; the state block was mutated by the resumed forward and is skipped.
+fn diffAudit(a: AdoptAudit, copy: *Copy, compare_state: bool) void {
+    if (copy.dev != null or a.parent_copy.dev != null) {
+        std.log.warn("qwen3_5: adopt audit skipped: a copy is device-backed (set TF_MOM_ADOPT_HOST)", .{});
+        return;
+    }
+    var off: usize = 0;
+    var bad: usize = 0;
+    for (a.map.writes, 0..) |w, i| {
+        defer off += w.len;
+        if (i == 0 and !compare_state) continue; // after a resume the state block holds the forward's writes, not the copy's
+        const src = a.parent_copy.host.bytes[w.src..][0..w.len];
+        const dst = copy.host.bytes[off..][0..w.len];
+        if (!std.mem.eql(u8, src, dst)) {
+            bad += 1;
+            var k: usize = 0;
+            while (k < w.len and src[k] == dst[k]) : (k += 1) {}
+            std.log.warn("qwen3_5: adopt audit piece {d} DIFFERS: first byte {d} of {d}", .{ i, k, w.len });
+        }
+    }
+    const n = a.map.writes.len - 1 - if (compare_state) @as(usize, 0) else 1;
+    std.log.warn("qwen3_5: adopt audit: {d} of {d} pieces bit-identical ({s})", .{ n - bad, n, if (compare_state) "cold" else "adopt" });
 }
 
 test "adoption map: the nested prefix takes the state head and the parent's first kv pieces" {
