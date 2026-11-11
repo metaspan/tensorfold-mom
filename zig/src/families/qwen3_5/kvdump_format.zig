@@ -131,6 +131,23 @@ pub fn decodeFp8(rows: []const u8, scales: []const u8, out: []f32) void {
     }
 }
 
+/// fp8 rows -> f32 bit patterns written byte-wise: no alignment assumptions, so buildBin
+/// can live on a plain allocation (this std has alignedAlloc but no alignedFree, and the
+/// device build's SafeAllocator panics on the mismatched free).
+pub fn decodeFp8ToBytes(rows: []const u8, scales: []const u8, out: []u8) void {
+    std.debug.assert(rows.len % head_dim == 0);
+    std.debug.assert(scales.len == rows.len / head_dim * 4);
+    std.debug.assert(out.len == rows.len * 4);
+    for (0..rows.len / head_dim) |t| {
+        const scale = std.mem.readInt(u32, scales[t * 4 ..][0..4], .little);
+        const s: f32 = @bitCast(scale);
+        for (0..head_dim) |d| {
+            const v: f32 = fp8ToF32(rows[t * head_dim + d]) * s;
+            std.mem.writeInt(u32, out[(t * head_dim + d) * 4 ..][0..4], @bitCast(v), .little);
+        }
+    }
+}
+
 /// A checkpoint's .bin bytes: header, tables, then the rows in dump order from a kept-state copy's
 /// key/value region (what cuda_reuse.zig packs after its state piece).
 pub fn buildBin(a: std.mem.Allocator, m: Meta, copy: []const u8) ![]u8 {
@@ -144,7 +161,7 @@ pub fn buildBin(a: std.mem.Allocator, m: Meta, copy: []const u8) ![]u8 {
     if (copy.len < want) return error.KvdumpCopyShort;
     const hb = headerBytes(n, seq);
     const total = hb + dataBytes(n, m.kv_heads, head_dim, seq, m.elem);
-    const bytes = try a.alignedAlloc(u8, .of(f32), total); // the f32 data region is written through f32 pointers
+    const bytes = try a.alloc(u8, total); // fp8 decode writes bit patterns byte-wise: no f32-aligned cast
     errdefer a.free(bytes);
     var h: Header = .{
         .elem = @intFromEnum(m.elem),
@@ -184,7 +201,7 @@ pub fn buildBin(a: std.mem.Allocator, m: Meta, copy: []const u8) ![]u8 {
             const scales = copyPiece(m.src, seq, k + 1);
             std.debug.assert(scales.len == seq * 4);
             const dst = out.ptr[0 .. seq * head_dim * 4];
-            decodeFp8(copy[rows.off..][0..rows.len], copy[scales.off..][0..scales.len], @as([*]f32, @alignCast(@ptrCast(dst)))[0 .. seq * head_dim]);
+            decodeFp8ToBytes(copy[rows.off..][0..rows.len], copy[scales.off..][0..scales.len], dst);
             out = out[dst.len..];
         }
     };

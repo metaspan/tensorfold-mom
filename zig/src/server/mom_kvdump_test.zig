@@ -132,6 +132,40 @@ test "kvdump: e4m3 and bf16 element decodes match their formats exactly" {
     try testing.expectEqual(@as(f32, 0.5), kvdump.bf16ToF32(0x3F00));
 }
 
+test "kvdump: decodeFp8ToBytes agrees with decodeFp8 element for element" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const rows = try a.alloc(u8, 2 * kvdump.head_dim);
+    const scales = try a.alloc(u8, 2 * 4);
+    for (0..rows.len) |i| rows[i] = if (i < kvdump.head_dim) 0x38 else 0xB8; // +1, -1
+    for (0..2) |t_| std.mem.writeInt(u32, scales[t_ * 4 ..][0..4], @bitCast(@as(f32, 0.5)), .little);
+    const via_f32 = try a.alloc(f32, rows.len);
+    const via_bytes = try a.alloc(u8, rows.len * 4);
+    kvdump.decodeFp8(rows, scales, via_f32);
+    kvdump.decodeFp8ToBytes(rows, scales, via_bytes);
+    for (0..rows.len) |i| {
+        const got = std.mem.readInt(u32, via_bytes[i * 4 ..][0..4], .little);
+        try testing.expectEqual(@as(u32, @bitCast(via_f32[i])), got);
+    }
+}
+
+test "kvdump: buildBin survives the device build's SafeAllocator (alignedAlloc free-mismatch regression)" {
+    // The device crash: alignedAlloc'd bytes freed plainly under SafeAllocator. Host tests
+    // on the testing allocator cannot see that class — run the real path under SafeAllocator.
+    var safe: std.heap.SafeAllocator = .init(testing.allocator, .{ .block_size_log2 = 12, .bucket_size_log2 = 12 });
+    defer _ = safe.deinit();
+    const a = safe.allocator();
+    const m = try metaOf(a, .fp8, &.{ 3 }, 3, 1);
+    const copy = try a.alloc(u8, kvdump.copyBytes(.fp8, 1, 1, 3));
+    @memset(copy, 0);
+    const bytes = try kvdump.buildBin(a, m, copy);
+    _ = try kvdump.parseHeader(bytes);
+    a.free(bytes); // must match the allocation's recorded alignment
+    a.free(copy);
+    a.free(m.token_ids); // layer_indices is borrowed (a stack literal), as in the writer
+}
+
 test "kvdump: the sidecar names the model, checkpoint, layers and element kind as JSON" {
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
