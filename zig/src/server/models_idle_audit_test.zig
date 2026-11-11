@@ -41,6 +41,7 @@ test "capability audit: model discovery waits for an idle reload and reads the p
     srv.info = .{ .context_window = 4096 };
     srv.config = .{ .served_name = "model", .model_ids = &.{ "model", "alias" } };
     srv.thinking_switch = false;
+    srv.mom = null; // this test builds Server as undefined; models() reads srv.mom
     srv.effort_levels = &.{};
     srv.think_close = &.{};
     // Discovery reads the template for effort use; this one names none.
