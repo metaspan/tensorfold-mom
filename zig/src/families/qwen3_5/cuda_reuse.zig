@@ -525,9 +525,10 @@ pub fn adoptCache(ne: *Engine, cache: *Cache, copy: *Copy, m: *const AdoptMap) !
             };
             try ne.d.check(ne.d.api.cuMemcpy2DAsync_v2(&m2, ne.stream.handle), "cuMemcpy2DAsync");
         }
-    } else for (m.writes[1..], 1..) |w, j| {
-        const i = j + 1;
+    } else for (1..m.writes.len) |i| {
+        const w = m.writes[i];
         const p = l.piece(i);
+        if (w.len != p.len) return error.BadAdoption; // write/dest pairing invariant (the off-by-one class)
         var it = Runs.of(cache, l, i, p);
         while (it.next()) |r| {
             const s, const o = .{ ne.stream.handle, w.src + r.at };

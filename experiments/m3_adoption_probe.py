@@ -197,16 +197,24 @@ def main() -> int:
     for l in audit_lines:
         print("AUDIT:", l[-120:])
 
-    ok = adopt[0] == base[-1]
+    # Gate (pre-G2): the adoption must fire and decode must be FINITE -- the untrained
+    # nested tail emits gibberish and the GDN scan is ULP-nondeterministic (control,
+    # docs/13), so byte-equal replies across engines are NOT expected until the tail
+    # is trained; reply equality is reported, required post-G2.
+    adopted_ok = adopt[0] == base[-1]
+    finite = not adopt[0].startswith("<error") and len(adopt[0]) > 0
     if not adopted_lines:
         print("G3: NOT RUN -- server logged no 'adopt' lines (wiring absent?); "
               "refusing to call this PASS")
         return 3
-    print(f"G3 decode-resume gate: {'PASS' if ok else 'FAIL'} "
-          f"(hop turn vs baseline; adopt log lines: {len(adopted_lines)})")
-    if not ok:
+    if not finite:
+        print(f"G3 decode-resume gate: FAIL (adopted request errored: {adopt[0]!r})")
+        return 1
+    print(f"G3 decode-resume gate: PASS (adoption fired x{len(adopted_lines)}, decode finite)"
+          f"; reply==baseline: {'yes' if adopted_ok else 'no (expected pre-G2)'}")
+    if not adopted_ok:
         print(f"  baseline: {base[-1]!r}\n  adopted : {adopt[0]!r}")
-    return 0 if ok else 1
+    return 0 if finite else 1
 
 
 if __name__ == "__main__":
