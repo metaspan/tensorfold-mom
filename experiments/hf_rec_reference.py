@@ -84,13 +84,21 @@ def main():
     print("hooking", tgt[0], type(tgt[1]).__name__)
     h = tgt[1].register_forward_hook(hook)
     model.eval()
+    # Force the exact naive recurrence: the chunk fallback is unreliable (region sweep
+    # showed r1+ corr~0); torch_recurrent_gated_delta_rule is the definition, same math
+    # as the engine's keep kernel (state[k,v]: S*=g; mem=S.k; S+=k*(beta*(v-mem))).
+    import transformers.models.qwen3_5_moe.modeling_qwen3_5_moe as MM
+    MM.chunk_gated_delta_rule = MM.torch_recurrent_gated_delta_rule
+    MM.torch_chunk_gated_delta_rule = MM.torch_recurrent_gated_delta_rule
     rec_captured = {}
+    cache_holder = {}
     def run_fwd():
         from transformers.cache_utils import DynamicCache
         dc_init = DynamicCache.__init__
         orig_urs = DynamicCache.update_recurrent_state
         def patched_init(self, *a, **k):
             dc_init(self, *a, **k)
+            cache_holder["c"] = self
             def urs(*args, **kw):
                 for x in list(args) + list(kw.values()):
                     if torch.is_tensor(x) and x.dim() == 4:
@@ -104,6 +112,28 @@ def main():
         finally:
             DynamicCache.__init__ = dc_init
     out = run_fwd()
+
+    # attention K/V cross-check vs the engine dump: if these match, the bf16 checkpoint
+    # and the NVFP4 engine agree up through layer 11 and the GDN-side is isolated; if
+    # they don't, the materializer's dequant is suspect (which also poisons distillation).
+    ck = load_model_dir("/home/derek/tensorfold-mom/experiments/results/m2-tf/kvdump/qwen36-nested-16l")
+    items = list(ck.values()) if isinstance(ck, dict) else list(ck)
+    c8 = [c for c in items if getattr(c, "at", None) == 179][0]
+    cache = cache_holder.get("c")
+    for L in (3, 7, 11):
+        for which in ("K", "V"):
+            eng = c8.kv[(L, which)]  # [2,179,256]
+            t = None
+            try:
+                t = getattr(cache.layers[L], "keys" if which == "K" else "values")
+            except Exception:
+                pass
+            if t is None:
+                print(f"L{L} {which}: cache attr missing"); continue
+            hf = t[0].float().cpu().numpy()
+            ok = float(np.abs(hf - eng.astype(np.float32)).max())
+            cc = float(np.corrcoef(hf.reshape(-1), eng.reshape(-1).astype(np.float32))[0, 1])
+            print(f"L{L} {which}: maxabs {ok:.5f} corr {cc:.5f}")
     h.remove()
     recs = rec_captured.get("states", [])
     print("recurrent updates:", [(tuple(x.shape), str(x.dtype)) for x in recs][:14])
