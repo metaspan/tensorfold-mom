@@ -434,4 +434,3 @@ test "router: classifier slot escalates at the default branch only" {
     const h = try r.decide(null, "Implement a full compiler backend for x86-64 in Rust with register allocation", 5);
     try std.testing.expectEqualStrings("classifier:hold", h.reason);
 }
-

@@ -541,14 +541,14 @@ pub fn adoptCache(ne: *Engine, cache: *Cache, copy: *Copy, m: *const AdoptMap, s
         var zc: usize = 0;
         var d: usize = 0;
         while (d < ne.g.deltas()) : (d += 1) {
-            const rec = @as([*]f32, @alignCast(@ptrCast(base + d * region)))[0 .. recb / 4];
+            const rec = @as([*]f32, @ptrCast(@alignCast(base + d * region)))[0 .. recb / 4];
             for (rec) |*v| {
                 if (!std.math.isFinite(v.*)) {
                     v.* = 0;
                     zr += 1;
                 }
             }
-            const conv = @as([*]u16, @alignCast(@ptrCast(base + d * region + recb)))[0 .. convb / 2];
+            const conv = @as([*]u16, @ptrCast(@alignCast(base + d * region + recb)))[0 .. convb / 2];
             for (conv) |*v| {
                 if ((v.* & 0x7F80) == 0x7F80 and (v.* & 0x007F) != 0) {
                     v.* = 0;
@@ -590,8 +590,14 @@ pub fn adoptCache(ne: *Engine, cache: *Cache, copy: *Copy, m: *const AdoptMap, s
             const host: ?*u8 = if (copy.dev == null) &copy.host.bytes.ptr[o] else null;
             const kind: c_int = @intCast(if (copy.dev == null) cuda.abi.memory_type_host else cuda.abi.memory_type_device);
             const m2: cuda.abi.Memcpy2D = .{
-                .src_type = kind, .src_host = host, .src = kept, .src_pitch = l.at * row,
-                .dst = dev, .dst_pitch = pg.tokens * row, .width = rows * row, .height = pieces,
+                .src_type = kind,
+                .src_host = host,
+                .src = kept,
+                .src_pitch = l.at * row,
+                .dst = dev,
+                .dst_pitch = pg.tokens * row,
+                .width = rows * row,
+                .height = pieces,
             };
             try ne.d.check(ne.d.api.cuMemcpy2DAsync_v2(&m2, ne.stream.handle), "cuMemcpy2DAsync");
         }
@@ -626,8 +632,7 @@ pub fn adoptCache(ne: *Engine, cache: *Cache, copy: *Copy, m: *const AdoptMap, s
 /// This mirrors the kernel's kv_row addressing exactly (parent_base + id*parent_elems +
 /// piece pitch ptok*row + row*HD) against the host copy the copy path would have written,
 /// and checks the uploaded device table names the parent's physical ids.
-fn sharedAudit(e: *Engine, cache: *const Cache, copy: *Copy, m: *const AdoptMap,
-               sv: AdoptSink.SharedRec, pages: usize) !void {
+fn sharedAudit(e: *Engine, cache: *const Cache, copy: *Copy, m: *const AdoptMap, sv: AdoptSink.SharedRec, pages: usize) !void {
     if (copy.dev != null or pages == 0) return; // host-pointer compare only
     const l: Layout = .{ .g = e.g, .format = copy.format, .cap = cache.cap, .at = m.at };
     const row: usize = head_dim * 2;
@@ -744,7 +749,7 @@ fn adoptVerify(ne: *Engine, cache: *const Cache, copy: *Copy, m: *const AdoptMap
         var d: usize = 0;
         while (d < ne.g.deltas()) : (d += 1) {
             const r_off = m.writes[0].src + d * region;
-            const rec = @as([*]const f32, @alignCast(@ptrCast(base_src + r_off)))[0 .. recb / 4];
+            const rec = @as([*]const f32, @ptrCast(@alignCast(base_src + r_off)))[0 .. recb / 4];
             for (rec, 0..) |v, el| {
                 if (!std.math.isFinite(v)) {
                     bad_total += 1;
@@ -752,7 +757,7 @@ fn adoptVerify(ne: *Engine, cache: *const Cache, copy: *Copy, m: *const AdoptMap
                     if (first_len == 0) first_len = (std.fmt.bufPrint(&first_where, "region {d} rec f32 element {d} head {d}", .{ d, el, el / (recb / 4 / ne.g.v_heads) }) catch return).len;
                 }
             }
-            const conv = @as([*]const u16, @alignCast(@ptrCast(base_src + r_off + recb)))[0 .. convb / 2];
+            const conv = @as([*]const u16, @ptrCast(@alignCast(base_src + r_off + recb)))[0 .. convb / 2];
             for (conv, 0..) |v, ci| {
                 if ((v & 0x7F80) == 0x7F80 and (v & 0x007F) != 0) {
                     bad_total += 1;
@@ -763,14 +768,14 @@ fn adoptVerify(ne: *Engine, cache: *const Cache, copy: *Copy, m: *const AdoptMap
         }
     }
     { // name every state region holding non-finites: correlating with the audit's differing
-      // region (11) pins the poison to the parent's own GDN layer, not the copy mechanism.
+        // region (11) pins the poison to the parent's own GDN layer, not the copy mechanism.
         var d: usize = 0;
         while (d < ne.g.deltas() and d < region_bad.len) : (d += 1) {
             if (region_bad[d] != 0) std.log.warn("qwen3_5: adopt verify scan: region {d}: {d} nonfinite", .{ d, region_bad[d] });
         }
     }
     for (1..m.writes.len) |pi| {
-        const rows = @as([*]const u16, @alignCast(@ptrCast(base_src + m.writes[pi].src)))[0 .. m.writes[pi].len / 2];
+        const rows = @as([*]const u16, @ptrCast(@alignCast(base_src + m.writes[pi].src)))[0 .. m.writes[pi].len / 2];
         for (rows, 0..) |v, j| {
             if ((v & 0x7F80) == 0x7F80 and (v & 0x007F) != 0) {
                 bad_total += 1;
@@ -812,8 +817,7 @@ pub fn takeControl() ?SaveControl {
 }
 
 fn controlResult(ok: bool, first_diff: usize, len: usize) void {
-    if (ok) std.log.warn("qwen3_5: adopt control: repeat save bit-identical ({d} bytes)", .{len})
-    else std.log.warn("qwen3_5: adopt control: REPEAT SAVE DIFFERS at byte {d} of {d} -- prefill is not bitwise deterministic", .{ first_diff, len });
+    if (ok) std.log.warn("qwen3_5: adopt control: repeat save bit-identical ({d} bytes)", .{len}) else std.log.warn("qwen3_5: adopt control: REPEAT SAVE DIFFERS at byte {d} of {d} -- prefill is not bitwise deterministic", .{ first_diff, len });
 }
 
 /// Store/compare the state block of a cold save against the same (prompt length, at) from a
@@ -1101,11 +1105,11 @@ fn regionScan(g: Geometry, blob: []const u8, off: usize) usize { // nonfinite co
     var n: usize = 0;
     var d: usize = 0;
     while (d < g.deltas()) : (d += 1) {
-        const rec = @as([*]const f32, @alignCast(@ptrCast(base + d * region)))[0 .. recb / 4];
+        const rec = @as([*]const f32, @ptrCast(@alignCast(base + d * region)))[0 .. recb / 4];
         for (rec) |v| {
             if (!std.math.isFinite(v)) n += 1;
         }
-        const conv = @as([*]const u16, @alignCast(@ptrCast(base + d * region + recb)))[0 .. convb / 2];
+        const conv = @as([*]const u16, @ptrCast(@alignCast(base + d * region + recb)))[0 .. convb / 2];
         for (conv) |v| {
             if ((v & 0x7F80) == 0x7F80 and (v & 0x007F) != 0) n += 1;
         }
