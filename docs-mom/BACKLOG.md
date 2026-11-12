@@ -60,6 +60,7 @@ Priorities are the reviewer's unless amended here, with the amendment reason.
 - GO gate (pre-registered per S1 lesson, per review §3): blended TTFT −15% vs stock AND thin decode ≥90% of stock 2B. Else park M4 + distillation.
 - Refs: review §3; `docs-mom/docs/13` M3
 - Status: check - IN FLIGHT: M4 device gate is running this very day (window rounds 0/1/5/6, attn-tiles fix awaiting verdict), so the review's "device gate not yet run" is stale; the 3-arm design is the correct frame and its GO thresholds are adopted verbatim as pre-registered. Note the review's upside table assumes post-distillation 3/7 shared layers; current pre-distillation nested adopts all 16 (optimistic bound, as it says).
+- Status: M4 toy device gate GREEN (2026-11-12, mom/main 19a969667): zero-copy shared-view reply byte-identical to the paged copy path (6 resolve lines), G3 decode-resume PASS x6 across boots. Root causes fixed: stateless `tf_q35_page_base` (the monotone-walk page-base cache broke under interleaved PageRuns + pending-row replay) on top of the four skvi reader-site fixes. Today's long red-run was phantom builds: `zig build … | tail; echo RC=$?` hid a failing exe compile (safe-mode `var poison` error) and the content-keyed fatbin step ignored header touches — no fixed kernel ever reached a tested binary until an honest rebuild. 35B BL-6 GO/NO-GO (TTFT −15% / decode ≥90%) still owed: needs the :8000 window.
 
 ### BL-7: Run deferred S3, E1–E5, S5 soak, O2 /metrics labels
 - Priority: P1
