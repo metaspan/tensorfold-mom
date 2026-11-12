@@ -589,11 +589,9 @@ fn controlCheck(e: *Engine, copy: *Copy, prompt: []const u32, g: Geometry) void 
     if (copy.dev != null) return; // host-backed only (TF_MOM_ADOPT_HOST)
     const st = @min(g.stateBytes(), copy.host.bytes.len);
     var namebuf: [64]u8 = undefined;
-    const name = std.fmt.bufPrint(&namebuf, "tf_mom_ctl_{d}_{d}.bin", .{ prompt.len, copy.at }) catch return;
-    const tmp = std.fs.openDirAbsolute("/tmp", .{ .write = true, .read = true }) catch return;
-    defer tmp.close();
+    const name = std.fmt.bufPrint(&namebuf, "/tmp/tf_mom_ctl_{d}_{d}.bin", .{ prompt.len, copy.at }) catch return;
     const src = copy.host.bytes[0..st];
-    if (tmp.openFile(name, .{})) |fh| {
+    if (std.fs.cwd().openFile(name, .{})) |fh| {
         defer fh.close();
         const buf = e.gpa.alloc(u8, st) catch return;
         defer e.gpa.free(buf);
@@ -606,7 +604,7 @@ fn controlCheck(e: *Engine, copy: *Copy, prompt: []const u32, g: Geometry) void 
         while (k < st and buf[k] == src[k]) : (k += 1) {}
         controlResult(k == st, k, st);
     } else |_| {
-        var fh = tmp.createFile(name, .{}) catch return;
+        var fh = std.fs.cwd().createFile(name, .{}) catch return;
         defer fh.close();
         fh.writeAll(src) catch {};
         std.log.warn("qwen3_5: adopt control: stored {s} ({d} bytes)", .{ name, st });
