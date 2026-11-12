@@ -61,8 +61,8 @@ def health():
         return False
 
 
-def boot(extra_env: dict):
-    log = open(LOG, "w")
+def boot(extra_env: dict, truncate: bool = False):
+    log = open(LOG, "w" if truncate else "a")
     env = os.environ.copy()
     env["TF_QWEN_REQUEST_STARTS"] = "1"
     env.update(extra_env)
@@ -118,7 +118,7 @@ def main() -> int:
     os.makedirs(OUT, exist_ok=True)
 
     # A. baseline nested
-    p = boot({})
+    p = boot({}, truncate=True)
     if p is None:
         return 2
     try:
@@ -132,9 +132,10 @@ def main() -> int:
     # long prompt, cold for the nested store, warm in the parent's sink). Replaying
     # every turn self-hits the nested store and adoption can never fire (run 1:
     # hits 7, misses 1 -- the lone cold miss was turn 1, too short vs the deep sink).
-    p = boot({"TF_MOM_ADOPT": "1"})
+    p = boot({"TF_MOM_ADOPT": "1", "TF_MOM_ADOPT_HOST": "1"})
     if p is None:
         return 2
+    adopt = ["<boot-failed>"]
     try:
         _ = replay(BIG_NAME, user_turns, replies)  # parent prefills the whole conversation
         hist = [{"role": "system", "content": SYSTEM}]
@@ -142,16 +143,50 @@ def main() -> int:
             hist.append({"role": "user", "content": c})
             if i + 1 < len(user_turns):
                 hist.append({"role": "assistant", "content": replies[i]})
-        r = post({"model": NESTED_NAME, "messages": hist, "max_tokens": 24, "temperature": 0,
-                  "stream": False, "chat_template_kwargs": {"enable_thinking": False}})
-        adopt = [r["choices"][0]["message"]["content"]]
+        try:
+            r = post({"model": NESTED_NAME, "messages": hist, "max_tokens": 24, "temperature": 0,
+                      "stream": False, "chat_template_kwargs": {"enable_thinking": False}})
+            adopt = [r["choices"][0]["message"]["content"]]
+        except Exception as e:  # an adopted 500 is a FAIL to diagnose, not a traceback
+            adopt = [f"<error {e}>"]
     finally:
         kill(p)
+    time.sleep(4)
+
+    # C. audit-only boot: the same conversation goes to the parent (sink) then to the
+    # nested engine COLD (adoption suppressed). Its cold save at the same cut compares
+    # byte-for-byte against the parent's kept copy -- including the GDN state block,
+    # which is fresh in a cold pass. A clean cold audit plus a broken adopt narrows the
+    # fault to the resume path; a dirty cold audit names the wrong piece of the map.
+    p = boot({"TF_MOM_ADOPT": "1", "TF_MOM_ADOPT_AUDIT": "1",
+              "TF_MOM_ADOPT_HOST": "1", "TF_MOM_AUDIT_COLD": "1"})
+    cold = ["<boot-failed>"]
+    if p is not None:
+        try:
+            _ = replay(BIG_NAME, user_turns, replies)
+            hist = [{"role": "system", "content": SYSTEM}]
+            for i, c in enumerate(user_turns):
+                hist.append({"role": "user", "content": c})
+                if i + 1 < len(user_turns):
+                    hist.append({"role": "assistant", "content": replies[i]})
+            try:
+                r = post({"model": NESTED_NAME, "messages": hist, "max_tokens": 24, "temperature": 0,
+                          "stream": False, "chat_template_kwargs": {"enable_thinking": False}})
+                cold = [r["choices"][0]["message"]["content"]]
+            except Exception as e:
+                cold = [f"<error {e}>"]
+        finally:
+            kill(p)
     # Only the real thing counts: 'adopted the paired engine's kept state' from adoptMiss.
     # (The parent's 'adopt sink at ...' save lines would otherwise make the gate vacuous.)
-    adopted_lines = [l for l in open(LOG) if "adopted the paired" in l.lower()]
-    json.dump({"baseline": base, "adopted": adopt, "log_adopt_lines": adopted_lines},
+    lines = open(LOG).read().splitlines()
+    adopted_lines = [l for l in lines if "adopted the paired" in l.lower()]
+    audit_lines = [l for l in lines if "adopt audit" in l.lower()]
+    json.dump({"baseline": base, "adopted": adopt, "cold": cold,
+               "log_adopt_lines": adopted_lines, "log_audit_lines": audit_lines},
               open(f"{OUT}/g3.json", "w"), indent=1)
+    for l in audit_lines:
+        print("AUDIT:", l[-120:])
 
     ok = adopt[0] == base[-1]
     if not adopted_lines:
