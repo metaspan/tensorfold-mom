@@ -169,8 +169,12 @@ def main() -> int:
     # in two boots must yield byte-identical replies -- that isolates resume+decode
     # determinism from the cold-prefill ULP noise the control proved.
     adopt_list: list[str] = []
+    adopt_by_round: dict[int, str] = {}
     ctl_present = bool(_glob.glob("/tmp/tf_mom_ctl_*.bin"))
-    for _round in range(2 + (3 if ctl_present else 0)):
+    skip_diag = os.environ.get("M3_SKIP_DIAGNOSTIC_ROUNDS") == "1"
+    for _round in range(2 + (4 if ctl_present else 0)):
+        if skip_diag and _round in (2, 3, 4):  # own_bytes diagnostics: already closed out
+            continue
         benv = {"TF_MOM_ADOPT": "1", "TF_MOM_ADOPT_HOST": "1", "TF_MOM_ADOPT_VERIFY": "1",
                 "TF_MOM_ADOPT_SANITIZE": "1"}
         if ctl_present:
@@ -181,6 +185,13 @@ def main() -> int:
             benv["TF_MOM_ADOPT_OWN_BYTES"] = "region11"
         if _round == 4:  # localize further: zero region 11 -- if finite, the parent's ~1e-3 rec
             benv["TF_MOM_ADOPT_OWN_BYTES"] = "zero11"  # values ARE the poison; if 500, conv too
+        if _round == 5:  # MoM M4: both engines paged; the thin cache reads the parent's KV pages in place
+            benv["TF_MOM_SHARED_VIEW"] = "1"
+            benv["TF_QWEN_KV_PAGES"] = "64"
+            # TF_QWEN_KV_PAGES alone leaves the engine's OWN stream at a contiguous
+            # window -- the parent's save would then not be on pages at all.
+            # PAGES_ALL moves every stream, the engine's own included, onto pool pages.
+            benv["TF_QWEN_KV_PAGES_ALL"] = "1"
         p = boot(benv)
         if p is None:
             break
@@ -195,8 +206,10 @@ def main() -> int:
                 r = post({"model": NESTED_NAME, "messages": hist, "max_tokens": 24, "temperature": 0,
                           "stream": False, "chat_template_kwargs": {"enable_thinking": False}})
                 adopt_list.append(r["choices"][0]["message"]["content"])
+                adopt_by_round[_round] = r["choices"][0]["message"]["content"]
             except Exception as e:  # an adopted 500 is a FAIL to diagnose, not a traceback
                 adopt_list.append(f"<error {e}>")
+                adopt_by_round[_round] = f"<error {e}>"
         finally:
             kill(p)
         time.sleep(4)
@@ -221,7 +234,7 @@ def main() -> int:
     pair = adopt_list[:2]
     finite = len(pair) == 2 and all(not a.startswith("<error") and len(a) > 0 for a in pair)
     deterministic = finite and adopt_list[0] == adopt_list[1]
-    own = adopt_list[2] if len(adopt_list) > 2 else None
+    own = adopt_by_round.get(2)
     if own is not None:
         own_ok = not own.startswith("<error") and len(own) > 0
         if own_ok and not finite:
@@ -240,6 +253,18 @@ def main() -> int:
     if not deterministic:
         print(f"G3 decode-resume gate: FAIL (same adopted bytes, differing replies: {adopt_list!r})")
         return 1
+    # MoM M4: the shared-view round must have actually resolved pages in the parent's
+    # arena (logged) and answered byte-identically to the copy path it replaces.
+    sv = adopt_by_round.get(5)
+    if sv is not None:
+        sv_lines = [l for l in lines if "adopt shared view" in l]
+        if not sv_lines:
+            print("M4 shared-view gate: FAIL -- paged round logged no shared-view line (silently fell back to the copy path)")
+            return 1
+        if sv.startswith("<error") or sv != adopt_list[0]:
+            print(f"M4 shared-view gate: FAIL (zero-copy reply differs: {sv[:60]!r} vs copy path {adopt_list[0][:60]!r})")
+            return 1
+        print(f"M4 shared-view gate: PASS ({len(sv_lines)} resolve lines; zero-copy reply byte-identical to the copy path)")
     print(f"G3 decode-resume gate: PASS (adoption fired x{len(adopted_lines)}, decode finite, "
           f"adopted replies byte-identical across boots); reply==baseline: "
           f"{'yes' if adopted_ok else 'no (expected pre-G2)'}")
