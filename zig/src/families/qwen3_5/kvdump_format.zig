@@ -155,7 +155,7 @@ pub fn buildBin(a: std.mem.Allocator, m: Meta, copy: []const u8) ![]u8 {
     const seq = m.token_ids.len;
     if (m.head_dim != head_dim) return error.KvdumpHeadDim;
     if (m.kv_heads == 0 or n == 0 or seq == 0) return error.KvdumpEmpty;
-    if (@intFromEnum(m.src) > 1 or @intFromEnum(m.elem) > 1) return error.KvdumpKind;
+    if (@backingInt(m.src) > 1 or @backingInt(m.elem) > 1) return error.KvdumpKind;
     if (m.src == .bf16 and m.elem != .bf16) return error.KvdumpKind; // bf16 rows pass through
     const want = copyBytes(m.src, m.kv_heads, n, seq);
     if (copy.len < want) return error.KvdumpCopyShort;
@@ -164,7 +164,7 @@ pub fn buildBin(a: std.mem.Allocator, m: Meta, copy: []const u8) ![]u8 {
     const bytes = try a.alloc(u8, total); // fp8 decode writes bit patterns byte-wise: no f32-aligned cast
     errdefer a.free(bytes);
     var h: Header = .{
-        .elem = @intFromEnum(m.elem),
+        .elem = @backingInt(m.elem),
         .n_layers = @intCast(n),
         .kv_heads = m.kv_heads,
         .head_dim = m.head_dim,
@@ -220,7 +220,7 @@ pub fn parseHeader(bytes: []const u8) !Header {
     if (h.head_dim != head_dim) return error.KvdumpHeadDim;
     if (h.elem > 1) return error.KvdumpKind;
     if (h.header_bytes != headerBytes(h.n_layers, h.seq_len)) return error.KvdumpHeaderBytes;
-    const need = h.header_bytes + dataBytes(h.n_layers, h.kv_heads, h.head_dim, h.seq_len, @enumFromInt(h.elem));
+    const need = h.header_bytes + dataBytes(h.n_layers, h.kv_heads, h.head_dim, h.seq_len, @fromBackingInt(@intCast(h.elem)));
     if (bytes.len < need) return error.KvdumpShort;
     return h;
 }
@@ -230,7 +230,7 @@ pub fn parseHeader(bytes: []const u8) !Header {
 pub fn tables(h: Header, bytes: []const u8) struct { layers: []const u32, tokens: []const u32 } {
     const ls = bytes[@sizeOf(Header)..][0 .. h.n_layers * 4];
     const ts = bytes[@sizeOf(Header) + h.n_layers * 4 ..][0 .. h.seq_len * 4];
-    return .{ .layers = @alignCast(@ptrCast(ls)), .tokens = @alignCast(@ptrCast(ts)) };
+    return .{ .layers = @ptrCast(@alignCast(ls)), .tokens = @ptrCast(@alignCast(ts)) };
 }
 
 /// The ckpt<N>.json sidecar: the same metadata as the header, JSON-addressable for the harness.
@@ -252,14 +252,9 @@ pub fn sidecar(a: std.mem.Allocator, m: Meta) ![]u8 {
     return std.fmt.allocPrint(a,
         \\{{"format":"{s}","version":1,"model":"{s}","model_dir":"{s}","ckpt":{d},"at":{d},"seq_len":{d},"layers":{s},"kv_heads":{d},"head_dim":{d},"elem":"{s}","cache_format":"{s}","page_tokens":{d},"bin":"{s}","data_bytes":{d},"token_hash":{d},"model_layers":{d}}}
     , .{
-        sidecar_format, model, dir, m.ckpt, m.token_ids.len, m.token_ids.len,
-        layers.items,   m.kv_heads, m.head_dim,
-        if (m.elem == .bf16) "bf16" else "f32",
-        if (m.src == .bf16) "bf16" else "fp8",
-        m.page_tokens,  bin,
-        dataBytes(m.layer_indices.len, m.kv_heads, head_dim, m.token_ids.len, m.elem),
-        tokenHash(m.token_ids),
-        m.model_layers,
+        sidecar_format, model,                                                                         dir,                    m.ckpt,                                 m.token_ids.len,                       m.token_ids.len,
+        layers.items,   m.kv_heads,                                                                    m.head_dim,             if (m.elem == .bf16) "bf16" else "f32", if (m.src == .bf16) "bf16" else "fp8", m.page_tokens,
+        bin,            dataBytes(m.layer_indices.len, m.kv_heads, head_dim, m.token_ids.len, m.elem), tokenHash(m.token_ids), m.model_layers,
     });
 }
 
