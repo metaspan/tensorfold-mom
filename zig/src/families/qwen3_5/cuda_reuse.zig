@@ -595,28 +595,33 @@ fn adoptVerify(ne: *Engine, cache: *const Cache, copy: *Copy, m: *const AdoptMap
         }
     }
     std.log.warn("qwen3_5: adopt verify: {d} of {d} device pieces match the copy", .{ ok_pieces, n_pieces });
-    // scan the state block's fp32 recurrences AND bf16 conv tails, plus every KV piece, for
-    // non-finite values: a NaN/Inf that rode in with the parent's bytes would explain a
-    // finite-bytes, nonfinite-decode paradox.
+    // scan the state block REGION-ADJACENT (rec fp32 then conv bf16, `deltas` regions), plus
+    // every KV piece, for non-finite values: a NaN/Inf that rode in with the parent's bytes
+    // would explain a finite-bytes, nonfinite-decode paradox.
     var bad_total: usize = 0;
-    var first_where: [96]u8 = undefined;
+    var first_where: [128]u8 = undefined;
     var first_len: usize = 0;
     const base_src: [*]const u8 = @ptrCast(copy.host.bytes.ptr);
     {
-        const rec_bytes = ne.g.deltas() * ne.g.recBytes();
-        const rec = @as([*]const f32, @alignCast(@ptrCast(base_src + m.writes[0].src)))[0 .. rec_bytes / 4];
-        for (rec, 0..) |v, el| {
-            if (!std.math.isFinite(v)) {
-                bad_total += 1;
-                if (first_len == 0) first_len = (std.fmt.bufPrint(&first_where, "rec f32 element {d} region {d}", .{ el, el * 4 / (ne.g.recBytes() | 1) }) catch return).len;
+        const recb = ne.g.recBytes();
+        const convb = ne.g.convBytes();
+        const region = recb + convb;
+        var d: usize = 0;
+        while (d < ne.g.deltas()) : (d += 1) {
+            const r_off = m.writes[0].src + d * region;
+            const rec = @as([*]const f32, @alignCast(@ptrCast(base_src + r_off)))[0 .. recb / 4];
+            for (rec, 0..) |v, el| {
+                if (!std.math.isFinite(v)) {
+                    bad_total += 1;
+                    if (first_len == 0) first_len = (std.fmt.bufPrint(&first_where, "region {d} rec f32 element {d} head {d}", .{ d, el, el / (recb / 4 / ne.g.v_heads) }) catch return).len;
+                }
             }
-        }
-        const tail = base_src[m.writes[0].src + rec_bytes ..][0 .. l.piece(0).len - rec_bytes];
-        const conv = @as([*]const u16, @alignCast(@ptrCast(tail.ptr)))[0 .. tail.len / 2];
-        for (conv, 0..) |v, ci| {
-            if ((v & 0x7F80) == 0x7F80 and (v & 0x007F) != 0) {
-                bad_total += 1;
-                if (first_len == 0) first_len = (std.fmt.bufPrint(&first_where, "conv bf16 element {d}", .{ci}) catch return).len;
+            const conv = @as([*]const u16, @alignCast(@ptrCast(base_src + r_off + recb)))[0 .. convb / 2];
+            for (conv, 0..) |v, ci| {
+                if ((v & 0x7F80) == 0x7F80 and (v & 0x007F) != 0) {
+                    bad_total += 1;
+                    if (first_len == 0) first_len = (std.fmt.bufPrint(&first_where, "region {d} conv bf16 element {d}", .{ d, ci }) catch return).len;
+                }
             }
         }
     }
