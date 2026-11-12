@@ -38,7 +38,7 @@ Priorities are the reviewer's unless amended here, with the amendment reason.
 - Area: mom-serve
 - Scope: MVP
 - Why: prompt cache is opt-in; mom-serve only warns when `TF_QWEN_REQUEST_STARTS` unset (B6). Measured: TTFT 46->11 trivial, 175->28 heavy.
-- Done when: mom-serve sets or refuses without `TF_QWEN_REQUEST_STARTS` and a B5 rerun shows ~85% cold / ~99.5% warm prefill saved.
+- Done when: mom-serve sets or refuses without `TF_QWEN_REQUEST_STARTS` and a B5 rerun shows ~85% cold / ~99.5% warm prefill saved; plus a startup assertion on each lane's cache mode covered by a host test (perplexity §9.1).
 - Refs: `docs-mom/docs/09`, PROGRESS B6
 - Status: check - matches B6 record exactly.
 
@@ -49,7 +49,7 @@ Priorities are the reviewer's unless amended here, with the amendment reason.
 - Why: `warm.zig` prefills next turns only on `srv.engine`; the other model stays cold across hops.
 - Done when: ON/OFF A/B on B5 cold pass + trivial TTFT under heavy saturation recorded.
 - Refs: `zig/src/server/warm.zig`, `docs-mom/docs/10`
-- Status: check - warm.zig warms srv.engine only (verified in B-line work); estimate-only claim accepted as P1, effort M.
+- Status: check - warm.zig warms srv.engine only (verified in B-line work); estimate-only claim accepted as P1, effort M. SUPERSEDED-BY BL-24 (ShadowPrefill framing: preemptible, exactness-preserving, and the control arm for BL-6).
 
 ### BL-6: Shared-KV go/no-go (time-boxed)
 - Priority: P1
@@ -60,6 +60,20 @@ Priorities are the reviewer's unless amended here, with the amendment reason.
 - GO gate (pre-registered per S1 lesson, per review §3): blended TTFT −15% vs stock AND thin decode ≥90% of stock 2B. Else park M4 + distillation.
 - Refs: review §3; `docs-mom/docs/13` M3
 - Status: check - IN FLIGHT: M4 device gate is running this very day (window rounds 0/1/5/6, attn-tiles fix awaiting verdict), so the review's "device gate not yet run" is stale; the 3-arm design is the correct frame and its GO thresholds are adopted verbatim as pre-registered. Note the review's upside table assumes post-distillation 3/7 shared layers; current pre-distillation nested adopts all 16 (optimistic bound, as it says).
+- Status: M4 toy device gate GREEN (2026-11-12, mom/main 19a969667): zero-copy shared-view reply byte-identical to the paged copy path (6 resolve lines), G3 decode-resume PASS x6 across boots. Root causes fixed: stateless `tf_q35_page_base` (the monotone-walk page-base cache broke under interleaved PageRuns + pending-row replay) on top of the four skvi reader-site fixes. Today's long red-run was phantom builds: `zig build … | tail; echo RC=$?` hid a failing exe compile (safe-mode `var poison` error) and the content-keyed fatbin step ignored header touches — no fixed kernel ever reached a tested binary until an honest rebuild. 35B BL-6 GO/NO-GO (TTFT −15% / decode ≥90%) still owed: needs the :8000 window.
+- Status: BL-6 round 2 ran (experiments/bl6_gate.py, results/bl6/bl6-20261112-1637.json). TTFT ratios copy=0.183 view=0.190 looked like a huge win but were VOID: the adoption arms returned EMPTY completions (`NonfiniteQwenLogits`, HTTP 500) — 0 decoded tokens, so their TTFT measured failure, not adoption. Stock decode 142.1 tok/s vs pre-registered ≥154 → the decode condition genuinely fails; verdict NO-GO stands even before BL-29. Round 1 (one nested session replayed per arm) is superseded: it measured nothing (thin's own in-boot cache flattened every TTFT); bl6_gate.py now warms the parent per salted variant and times the cold thin. See BL-29.
+
+### BL-29: Adopted STATE BLOCK carries finite-but-wrong values on the production pair (NonfiniteQwenLogits)
+- Priority: P1 (blocks any 35B adoption measurement; BL-6 TTFT arm and distill v2 both sit behind it)
+- Found: 2026-11-12, BL-6 round 2 + repro (experiments/repro_adopt_cold.py). Cold-thin adoption on parent (qwen36-35b-a3b-nvfp4) + qwen36-nested-16l aborts `reason=error (NonfiniteQwenLogits)` on the device-backed copy path (production default on GB10 integrated). (Was filed as "BL-26: device copy writes poison bytes" — superseded below; renumbered because BL-26 was already taken by the lane-rename item.)
+- Narrowed 2026-11-12 evening (three device windows, 4e56ef1dd instrumentation):
+  - adoptVerify is now DEVICE-capable (it used to self-skip on device copies — the reason this had zero byte visibility): **17/17 device pieces match the copy** — the copy bytes land correctly; save/restore addressing is fine. The "device copy writes garbage" hypothesis is DEAD.
+  - The old audit's "EVERY piece DIFFERS at byte 0" was a FALSE ALARM: it compared the adopted bytes against the thin engine's OWN cold save (wrong baseline; tail regions legitimately differ) and self-skipped on device copies anyway.
+  - NaN sanitizing the adopted state made no difference (568 conv bf16 non-finites zeroed per adoption — real, but not the poison): the copy's state block then scans fully finite and the decode still 500s.
+  - **Bisection: `TF_MOM_ADOPT_ZERO_STATE=1` (zero the adopted state block) → device adoption decodes 48 real tokens.** The fault is confined to the state block, and it is FINITE-BUT-WRONG values (huge recurrences or stale conv windows that overflow the resumed delta-rule/conv math into Inf logits). KV pages, shared-view resolution and the kernel read-path are exonerated.
+- Fixed alongside (4e56ef1dd): adopt state sanitizer was env-gated AND host-copy-only, so it never ran on production device copies; now unconditional on both paths (device copies stage→sanitize→write back). adoptVerify verifies device copies too. Levers: `TF_MOM_ADOPT_ZERO_STATE`, `TF_MOM_ADOPT_DUMP` (dump the adopted state block).
+- Suspect (next bisection): parent keeps state at `at` with pending keep-rows flushed, whereas the same-engine restore path that works (host mode) reads a save produced at a different quiesce point — or a region-index/geometry mismatch inside piece 0 that the piece-granular verify cannot see (verify compares the whole state piece and matches, so the wrong-but-finite values are in BOTH copy and pages: the poison is written at PARENT SAVE time or is what the parent's own cache legitimately holds where thin reads differently). Next step: `TF_MOM_ADOPT_DUMP` two-boot byte-compare (device vs host copy of the same prompt's state block) to name the poisoned regions, then decide fix locus (parent save quiesce vs adopt-time region clamp).
+- Done when: BL-6 round 3 completes with real adopted completions in B/C (usage.completion_tokens > 0, finite) without ZERO_STATE; host shadow covers the device-copy leg.
 
 ### BL-7: Run deferred S3, E1–E5, S5 soak, O2 /metrics labels
 - Priority: P1
@@ -75,7 +89,7 @@ Priorities are the reviewer's unless amended here, with the amendment reason.
 - Area: qa
 - Scope: MVP
 - Why: post-switch incoherent/empty replies are the known bug class (docs/12 run 1, B3 template/thinking); Compute Lanes' "arm proof" analogue.
-- Done when: gate script fails on empty or incoherent post-switch reply.
+- Done when: gate script fails on empty or incoherent post-switch reply; formulation per Compute Lanes "arm proof": require N tokens of continued decode matching the copy-path baseline, not merely "adoption fired"; include think-block/template tests across hops (EOS-in-forced-tokens, `<think>` reopening after injected content).
 - Refs: review §6
 - Status: check - no such gate exists; accepted.
 
@@ -134,7 +148,7 @@ Priorities are the reviewer's unless amended here, with the amendment reason.
 - Scope: MVP
 - Why: DroidSpeak, Cache-to-Cache, MatFormer, LMCache are directly adjacent prior work; reviewers/upstream will ask.
 - Done when: related-work section in docs-mom citing them + BL-12 refs.
-- Refs: arXiv 2411.02820, 2510.03215, 2310.07707, LMCache repo
+- Refs: arXiv 2411.02820, 2510.03215, 2310.07707, LMCache repo; plus ShadowPrefill (2611.13176), NVIDIA cross-model KV transfer (2608.03893), BridgeKV (2611.11761), ICaRus (2603.13281), PrefillShare (2602.12029), LayerSkip (2404.16710), MatFormer/Gemma 3n, Minitron (nvlabs/minitron), vLLM Semantic Router (naming prior art) — per perplexity review §8.
 - Status: check - none present today; cheap and genuinely relevant; accepted.
 
 ## P3 — upstream, post-MVP (NOTE ONLY per Derek's scope rule)
@@ -168,3 +182,80 @@ Priorities are the reviewer's unless amended here, with the amendment reason.
 - Priority: P3 · Area: upstream · Scope: post-MVP (note only)
 - Why: `docs-mom/UPSTREAM-PRs.md` PRs touch stream/pool paths; lanes does too; ATC overlap check + early contact.
 - Status: check - folded into UPSTREAM-PRs.md ritual (atc overlap exists); noted.
+
+## Added 2026-11-12 from the Perplexity review
+
+Origin: `docs-mom/reviews/2026-11-12-perplexity-review.md` (tasks in its §9, MVP table §5).
+
+### BL-21: Offline G2 proxy + programme kill criterion (before further nested device spend)
+- Priority: P1
+- Area: distill
+- Scope: MVP
+- Why: G2 decides whether the thin model is worth existing; M4/M3 infrastructure is currently running ahead of it. Depth-pruned students in the Minitron line need 100B+-token distillation budgets (Mistral-NeMo-Minitron 8B: 380B); our 10/40-layer keep + 6-layer tail is an aggressive cut and 96 seeds won't close it.
+- Done when: (1) bf16/HF offline tail distillation on hundreds of millions of mixed-chat tokens (logit KD, teacher = 35B); (2) parity eval vs stock Qwen3.5-2B on a few hundred held-out trivial items, threshold PRE-REGISTERED; (3) thin-decode tok/s measured (if slower than the 2B's 171 tok/s there is no routing case); (4) written programme kill criterion in the gate ledger (e.g. "no 2B parity within N GPU-hours -> re-scope to drafter/cascade, pause M4").
+- Refs: perplexity review §4.1; Minitron (nvlabs/minitron)
+- Status: check - distill v2 (queued) partially satisfies (1)-(2) at small scale; its gate (>=10/12 coherent) is not parity-vs-2B. This item gates all further device spend per reviewer §9.5.
+
+### BL-22: Host-side shadow model + property tests for pool/table/AdoptMap/SharedView; point-of-use checksum
+- Priority: P1
+- Area: qa
+- Scope: MVP
+- Why: every recent M4 bug was a host-side index/lifetime error burned in a scarce device window (ed4334c pairing off-by-one, b55814f audit page-offset, 7618be0 table clobber sampled pre-clobber). The dual-site reader bug (attn tiles vs kv_row) is exactly what a host model would enumerate.
+- Done when: `test-kv-pool` gains a randomized (adopt/growth/resume/evict/drop) sequence property test against a host shadow of pool, page table, AdoptMap, SharedView, including EVERY kernel-side resolution site as a modeled reader; plus debug-only point-of-use row checksum during decode behind `TF_MOM_SHARED_VERIFY`.
+- Refs: perplexity review §4.4; commits ed4334c, b55814f, 7618be0
+- Status: check - none exists; complements the toy-pair harness (engine-in-the-loop) with a pure-host model. To precede any M4-class device spend beyond the current window.
+- Status: partial (2026-11-12, df94ab389 on mom/main) - `zig/src/core/kv_pool_sharedview_shadow_test.zig` added to `test-kv-pool`: host shadow of pool (pin/refcount/reissue guard), owner Wholesale reupload from offset 0, adopt-time pins, the view's own skvi, and ALL FOUR kernel reader sites (kv_row, Bf16Tiles kp/vp, near-page fast-path, tf_q35_attn_partial_paged) as independent formula transcriptions. Randomized property test (5 seeds; growth / resume reupload / parent decode) passes; the bite test injects each historical bug (shared-via-pt, near-ids-via-pt, adopt pairing off-by-one, audit zero-window) and each is caught. REMAINING for full BL-22: AdoptMap/evict/drop ops in the op alphabet, and the debug-only point-of-use row checksum under TF_MOM_SHARED_VERIFY.
+
+### BL-23: Reframe S1 conclusion + GDN/memory honesty in docs
+- Priority: P2
+- Area: docs
+- Scope: MVP
+- Why: (a) our "translation NOT VIABLE" is broader than measured — Heo et al. (NVIDIA, arXiv 2608.03893) find real linear structure with RoPE stripped, top-k source layers, 128K-token calibration; our wording must be "single-layer ridge map on RoPE-applied keys calibrated on one conversation is not viable". (b) ~2/3 of each kept-state snapshot is fixed-size GDN state (87 MiB heavy); attention-only sharing cannot dedupe it — drop any KV-memory-saving headline; the payoff sentence is "hop cost O(context) -> O(tail)", shown as a curve vs unseen length L.
+- Done when: docs/12 and docs/10/13/14 wording corrected; white paper uses the O(context)->O(tail) framing.
+- Refs: perplexity review §3.3, §3.5
+- Status: check - our own measurements support (b): M3 adopts state pieces byte-identical and attention rows are the minority of snapshot bytes.
+
+### BL-24: Shadow prefill (preemptible cross-lane warming) as the exact control arm
+- Priority: P1
+- Area: mom-serve
+- Scope: MVP
+- Why: ShadowPrefill (arXiv 2611.13176) warms the non-chosen model's cache in idle capacity — each model computes its OWN exact KV, preemptible, no correctness exposure; reports 44-47% switch-TTFT cuts. It reaches the entire 47.3% cold ceiling exactly and training-free, so it is simultaneously (i) a likely MVP feature and (ii) the control arm every sharing scheme (M4 included) must beat. Supersedes/absorbs BL-5.
+- Done when: idle-capacity prefill of the non-chosen lane using existing request-start states; B5-cold hop-turn TTFT reduced with no B7 active-decode regression; BL-6 verdict re-scored against it.
+- Refs: perplexity review §4.2, P4, §9.6
+- Status: check - supersedes metaspan BL-5 (same mechanism, stronger framing as control arm). Pre-emptible scheduling design needed (decode bandwidth-bound vs prefill compute-bound on GB10 — B7 says interference low).
+
+### BL-25: Gate ledger
+- Priority: P2
+- Area: qa
+- Scope: MVP
+- Why: thresholds have occasionally drifted post-hoc; S1's false-GO came from a leak discovered after the fact. A ledger (id, criterion, threshold, result, n, commit, date, status) makes pre-registration checkable.
+- Done when: `docs-mom/GATES.md` lists every gate incl. distill v2's >=10/12, BL-21 parity threshold, BL-6 GO gate, M4 identity gate.
+- Refs: perplexity review §4.6
+- Status: check - does not exist; cheap.
+
+### BL-26: Rename MoM "lane" before upstreaming; position naming vs vLLM Semantic Router
+- Priority: P2
+- Area: upstream
+- Scope: post-MVP (before PR submission)
+- Why: "lane" currently means MoM engines, TensorFold `core/lanes`, and JJ Eaton's Compute Lanes; vLLM-SR already markets "Mixture of Models (MoM)". Upstream reviewers will reject the ambiguity.
+- Done when: MoM concept renamed (candidate: "seat"/"tier") across mom-serve/router docs + code, and docs-mom positions the project as "single-process MoM with shared state".
+- Refs: perplexity review §4.6
+- Status: check - filed against the UPSTREAM-PRs.md re-apply ritual; must land before PR slice 4 (mom-serve).
+
+### BL-27: Cascade-escalation and self-speculative reframes for the nested model
+- Priority: P3
+- Area: research
+- Scope: post-MVP (note)
+- Why: adoption is bidirectional (M3): "thin answers first, escalate on low confidence" costs the heavy side almost nothing — the expensive half of every cascade; structurally the thin model is also a LayerSkip-style self-speculative drafter over the shared prefix (compare acceptance vs the MTP drafter).
+- Done when: recorded decision note with measurements if pursued.
+- Refs: perplexity review §4.3; LayerSkip (2404.16710); vLLM-SR cascade docs
+- Status: check - noted only.
+
+### BL-28: Sleep/wake: confirm park's kept-state behaviour; spill-gib prompt cache; wake profiling
+- Priority: P2
+- Area: mom-serve
+- Scope: MVP
+- Why: if park drops kept states, every post-wake turn is a cold re-prefill after a 12-14 s wake; upstream CUDA supports `--spill-gib` for Qwen3.6-35B-A3B (#1413/#1471; M5 Ultra datapoint: 32k conversation resumed 1.3 s vs 4.9 s). Wake at 11.9-14.5 s for ~21.8 GiB (~1.6-1.9 GB/s) is probably not disk-bound — profile phases.
+- Done when: (1) B5 replay across forced sleep establishes whether `resumed at` is non-zero post-wake today; (2) if dropped, spill enabled and byte-identical post-wake reply proven; (3) per-phase wake timing logged.
+- Refs: perplexity review §5 P1/P2, §9.3; PROGRESS B4
+- Status: check - reviewer explicitly flags park behaviour as unconfirmed; step 1 is a cheap factual probe.
