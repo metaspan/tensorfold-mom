@@ -186,8 +186,12 @@ extern "C" __global__ void tf_q35_attn_partial_paged(Geo geo, const __nv_bfloat1
         scan([&](int s, int pos) { return (s == 0 ? K : V) + (size_t)pos * HD; });
     } else {
         TfQ35PageRun page{reinterpret_cast<const int*>(sg.pt), sg.ptok, -1, sg.ps, 0};
+        TfQ35PageRun shpage{reinterpret_cast<const int*>(sg.pt), sg.ptok, -1, sg.sps, 0};
+        const bool view = sg.shp > 0;
         scan([&](int s, int pos) {
             const size_t blk = ((size_t)layer * 2 + s) * KVH + h;
+            if (view && pos / sg.ptok < sg.shp)
+                return reinterpret_cast<const __nv_bfloat16*>(sg.skv) + tf_q35_page_base(&shpage, pos) + (blk * sg.ptok + pos % sg.ptok) * HD;
             return KV + tf_q35_page_base(&page, pos) + (blk * sg.ptok + pos % sg.ptok) * HD;
         });
     }

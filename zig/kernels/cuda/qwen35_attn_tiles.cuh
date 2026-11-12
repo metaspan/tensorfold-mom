@@ -95,6 +95,9 @@ struct Bf16Tiles {
     // the key head's rows: a slab of cap rows, or (pt set) pages of ptok rows in qwen35.cu's layout
     const __nv_bfloat16* arena;
     TfQ35PageRun page;
+    const __nv_bfloat16* sharena; // MoM M4 shared view: the parent arena for the first shp_ pages
+    TfQ35PageRun shpage;
+    int shp_;
     size_t lblk, hoff, vgap;  // a page's layer block (elements), the head's first row in it, keys to values
     int ptok;
     bool paged;
@@ -106,6 +109,10 @@ struct Bf16Tiles {
         V = K + (size_t)kvh * sg.cap * HD;
         arena = reinterpret_cast<const __nv_bfloat16*>(sg.kv);
         page = TfQ35PageRun{reinterpret_cast<const int*>(sg.pt), sg.ptok, -1, sg.ps, 0};
+        // MoM M4 shared view: the first `shp` logical pages resolve into the parent arena.
+        sharena = reinterpret_cast<const __nv_bfloat16*>(sg.skv);
+        shpage = TfQ35PageRun{reinterpret_cast<const int*>(sg.pt), sg.ptok, -1, sg.sps, 0};
+        shp_ = sg.shp;
         lblk = (size_t)layer * 2 * kvh * sg.ptok * HD;
         hoff = (size_t)h * sg.ptok;
         vgap = (size_t)kvh * sg.ptok * HD;
@@ -113,7 +120,11 @@ struct Bf16Tiles {
         paged = sg.pt != 0;
     }
     // cache position pos's row of keys and of values (pos >= 0)
-    __device__ const __nv_bfloat16* kp(int pos) { return paged ? arena + tf_q35_page_base(&page, pos) + lblk + (hoff + pos % ptok) * HD : K + (size_t)pos * HD; }
+    __device__ const __nv_bfloat16* kp(int pos) {
+        if (!paged) return K + (size_t)pos * HD;
+        if (shp_ > 0 && pos / ptok < shp_) return sharena + tf_q35_page_base(&shpage, pos) + lblk + (hoff + pos % ptok) * HD;
+        return arena + tf_q35_page_base(&page, pos) + lblk + (hoff + pos % ptok) * HD;
+    }
     __device__ const __nv_bfloat16* vp(int pos) { return paged ? kp(pos) + vgap : V + (size_t)pos * HD; }
     template <class Row>
     __device__ void fetch(int t0, Row row) {
@@ -126,8 +137,9 @@ struct Bf16Tiles {
             const __nv_bfloat16* v = V + (size_t)pos * HD;
             if (paged) {
                 if (near == nullptr || pos < lo || pos - lo >= ptok) {
+                    const bool sh = shp_ > 0 && pos / ptok < shp_;
                     lo = pos / ptok * ptok;
-                    near = arena + (size_t)page.ids[lo / ptok] * page.stride + lblk + hoff * HD;
+                    near = (sh ? sharena : arena) + (size_t)page.ids[lo / ptok] * (sh ? shpage.stride : page.stride) + lblk + hoff * HD;
                 }
                 k = near + (size_t)(pos - lo) * HD;
                 v = k + vgap;

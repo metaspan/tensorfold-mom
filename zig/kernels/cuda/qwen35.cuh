@@ -40,6 +40,14 @@ struct Seg {
     int ptok;                 // positions a KV page holds
     int pn;                   // pending kept rows the slot scan replays first (negative: replayed, not written back)
     unsigned long long plog;  // their heads: cuda_cache.zig's pending buffer (pend_row)
+    // MoM M4 (docs/14): a thin engine's shared KV view. The first `shp` logical pages resolve
+    // into the parent cache's arena (skv, `sps` elements a page) instead of this cache's own:
+    // the parent's pages hold every attention layer of the shared prefix at the same in-page
+    // block offsets (the thin engine's attention layers are the parent's first ones, equal
+    // ptok). 0: no view. The tail pages and all writes stay this cache's own.
+    unsigned long long skv;
+    unsigned long long sps;
+    int shp;
 };
 
 // Seg.kv's element of layer a's key (s 0) or value (s 1) at pos, head h: cap rows a head, or pos's page's row.
@@ -47,6 +55,10 @@ __device__ __forceinline__ size_t kv_row(const Seg& sg, int kvh, int a, int s, i
     const size_t blk = ((size_t)a * 2 + s) * kvh + h;
     if (sg.pt == 0) return (blk * sg.cap + pos) * HD;
     const int* pt = reinterpret_cast<const int*>(sg.pt);
+    // shared prefix: resolve the page id through the parent arena (byte offsets are returned
+    // relative to Seg.kv, the callers' base: the arenas differ, so carry the base delta).
+    if (sg.shp > 0 && pos / sg.ptok < sg.shp)
+        return (size_t)((sg.skv - sg.kv) >> 1) + (size_t)pt[pos / sg.ptok] * sg.sps + (blk * sg.ptok + pos % sg.ptok) * HD;
     return (size_t)pt[pos / sg.ptok] * sg.ps + (blk * sg.ptok + pos % sg.ptok) * HD;
 }
 

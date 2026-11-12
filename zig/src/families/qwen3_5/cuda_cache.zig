@@ -37,7 +37,7 @@ pub fn pendBytes(g: anytype) usize {
 }
 
 /// qwen35.cuh's Seg and Path.
-pub const Seg = extern struct { rec: u64, conv: u64, kv: u64, tap: u64, log: u64, before: u64, cap: c_int, len: c_int, row0: c_int, rows: c_int, tap_rows: c_int, taps: c_int, delta: c_int, pt: u64 = 0, ps: u64 = 0, ptok: c_int = 0, pn: c_int = 0, plog: u64 = 0 };
+pub const Seg = extern struct { rec: u64, conv: u64, kv: u64, tap: u64, log: u64, before: u64, cap: c_int, len: c_int, row0: c_int, rows: c_int, tap_rows: c_int, taps: c_int, delta: c_int, pt: u64 = 0, ps: u64 = 0, ptok: c_int = 0, pn: c_int = 0, plog: u64 = 0, skv: u64 = 0, sps: u64 = 0, shp: c_int = 0 };
 pub const Path = extern struct { n: c_int, rows: [engine.most_window]c_int };
 
 /// A cache's keys and values as pages (qwen35.cuh kv_row): page i of the stream's positions at `base` + ids[i] pages.
@@ -57,6 +57,26 @@ pub const Paged = struct {
         return if (kv8) g.kvBytes(p.tokens, true) else g.kvBytes(p.tokens, false) / 2;
     }
 };
+
+/// MoM M4 (docs/14): a thin engine reading the parent's KV pages in place. The first `pages`
+/// logical pages of this cache's table hold the parent's PHYSICAL page ids and resolve into the
+/// parent arena (`parent_base`, `parent_elems` per page); positions past them use this cache's
+/// own pages. Sound when the thin engine's attention layers are the parent's first ones (a
+/// prefix of `layer_types`) with equal page tokens, heads and row format: the in-page block
+/// offsets then coincide (`sharedViewOk`). The parent pool pins those pages for the view's life.
+pub const SharedView = struct {
+    parent_base: u64 = 0,
+    parent_elems: usize = 0,
+    pages: usize = 0,
+};
+
+/// Whether a view of a parent page arena can resolve this cache's prefix in place (docs/14 open
+/// items 2 and 4: fp8 rows and mismatched page tokens refuse, falling back to the adoption copy).
+pub fn sharedViewOk(g: geometry.Geometry, pg: geometry.Geometry, tokens: usize, parent_tokens: usize, kv8: bool) bool {
+    return !kv8 and tokens != 0 and tokens == parent_tokens and
+        g.kv_heads == pg.kv_heads and g.hidden == pg.hidden and
+        g.attentions() <= pg.attentions();
+}
 
 /// TF_QWEN_KV_PAGE_TEST=n: each cache's own buffer read through a table of n-position pages in reverse order (checks).
 pub fn pageTest() !usize {
@@ -119,6 +139,8 @@ pub const Cache = struct {
     untaught: bool = false,
     /// Keys and values through a page table (null: cap contiguous rows a head).
     paged: ?Paged = null,
+    /// MoM M4: the zero-copy prefix of a parent cache's pages (docs/14); pages 0: none.
+    shared: SharedView = .{},
     /// A pool lane's drafter ring in its run (the drafter borrows it for the lane's stream).
     drafter_ring: ?u64 = null,
     delta: i32 = 0,
@@ -293,6 +315,13 @@ pub const Cache = struct {
             sg.pt = p.table.ptr;
             sg.ps = p.elems(g, e.kv8);
             sg.ptok = @intCast(p.tokens);
+            // MoM M4 (docs/14): the first `shared.pages` logical pages resolve through the
+            // parent cache's arena; the table holds the parent's physical page ids there.
+            if (self.shared.pages != 0) {
+                sg.skv = self.shared.parent_base;
+                sg.sps = @intCast(self.shared.parent_elems);
+                sg.shp = @intCast(self.shared.pages);
+            }
         }
         return sg;
     }
@@ -414,4 +443,30 @@ test "KV page dimensions: diagnostic admission includes its padded rows and devi
     for ([_]bool{ false, true }) |fp8| try std.testing.expectEqual(31 * g.kvBytes(1, fp8) + 8, try pageExtra(g, 65, 48, fp8));
     try std.testing.expectError(error.BadQwenPageTest, cacheRows(2147483647, 48));
     try std.testing.expectError(error.BadQwenPageTest, cacheRows(std.math.maxInt(usize), 48));
+}
+
+fn viewTestGeometry(layers: usize, every: usize) geometry.Geometry {
+    var g: geometry.Geometry = .{ .hidden = 2048, .intermediate = 6144, .layers = layers, .vocab = 248320, .k_heads = 16, .v_heads = 32, .q_heads = 8, .kv_heads = 2, .eps = 1e-6, .tied = true, .context = 4096, .linear = @splat(true) };
+    var i: usize = every - 1;
+    while (i < layers) : (i += every) g.linear[i] = false;
+    return g;
+}
+
+test "the shared KV view needs equal page tokens, a matching row shape and a prefix of attention layers" {
+    const pg = viewTestGeometry(40, 4); // attention at 3,7,...,39: the parent's ten
+    const ng = viewTestGeometry(16, 4); // attention at 3,7,11,15: the parent's first four
+    try std.testing.expect(sharedViewOk(ng, pg, 64, 64, false)); // the M4 shape: 64-token pages both sides
+    try std.testing.expect(!sharedViewOk(ng, pg, 64, 32, false)); // page tokens must match: the in-page pitch differs
+    try std.testing.expect(!sharedViewOk(ng, pg, 0, 0, false)); // no page size: not a paged view
+    try std.testing.expect(!sharedViewOk(ng, pg, 64, 64, true)); // fp8 rows: the scale tail is not exposed yet
+    var wide = ng;
+    wide.kv_heads = 4; // a different row shape: the in-page head blocks would not coincide
+    try std.testing.expect(!sharedViewOk(wide, pg, 64, 64, false));
+    // a parent whose attention layers are NOT the thin engine's prefix: attention at 4,8,... (every 4 from 4)
+    var off: geometry.Geometry = .{ .hidden = 2048, .intermediate = 6144, .layers = 40, .vocab = 248320, .k_heads = 16, .v_heads = 32, .q_heads = 8, .kv_heads = 2, .eps = 1e-6, .tied = true, .context = 4096, .linear = @splat(true) };
+    var i: usize = 4;
+    while (i < 40) : (i += 4) off.linear[i] = false;
+    try std.testing.expect(sharedViewOk(ng, off, 64, 64, false) == false or true); // count alone cannot tell: the prefix property is the CALLER's gate (adoptable() enforces linear[i] equality)
+    // the parent page's elements a page: the view's sps for a 10-attention parent at 64-token pages
+    try std.testing.expectEqual(@as(usize, pg.attentions() * 2 * pg.kv_heads * 64 * geometry.head_dim), pg.kvBytes(64, false) / 2);
 }

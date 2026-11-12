@@ -271,6 +271,16 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
     const adopt_tests = b.addRunArtifact(b.addTest(.{ .root_module = adopt_root, .filters = &.{ "adoption map", "adopt sink" } }));
     b.step("test-mom-adopt-host", "Nested-upcycle adoption map arithmetic without a GPU").dependOn(&adopt_tests.step);
     step.dependOn(&adopt_tests.step);
+    // docs/14 M4: the shared KV page view's admission rules (the device gate lands with M3's close)
+    const cache_root = b.createModule(.{ .root_source_file = b.path("zig/src/families/qwen3_5/cuda_cache.zig"), .target = host, .optimize = .debug, .link_libc = true });
+    cache_root.addImport("cuda", cuda);
+    cache_root.addImport("core", mods.core);
+    cache_root.addImport("lanes", mods.lanes);
+    cache_root.addImport("qwen35_layers", b.createModule(.{ .root_source_file = b.path("zig/src/core/qwen35_layers.zig"), .target = host, .optimize = .debug }));
+    cache_root.addImport("qwen35_rules", b.createModule(.{ .root_source_file = b.path("zig/src/core/qwen35_rules.zig"), .target = host, .optimize = .debug }));
+    const cache_tests = b.addRunArtifact(b.addTest(.{ .root_module = cache_root, .filters = &.{"shared KV view"} }));
+    b.step("test-mom-cache-host", "Shared KV page view admission without a GPU").dependOn(&cache_tests.step);
+    step.dependOn(&cache_tests.step);
     const bolt = b.step("test-bolt-host", "Nemotron Bolt and shared lane host contracts");
     const cuda_target = b.resolveTargetQuery(.{ .cpu_arch = host.result.cpu.arch, .os_tag = .linux, .abi = .gnu });
     const check_cuda = runtime(b, cuda_target, .debug, &.{});
