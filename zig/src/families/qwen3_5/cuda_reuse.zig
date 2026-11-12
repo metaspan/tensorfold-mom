@@ -657,7 +657,10 @@ fn sharedAudit(e: *Engine, cache: *const Cache, copy: *Copy, m: *const AdoptMap,
         var bad: ?struct { k: usize, b: usize, d: u8, s: u8 } = null;
         var k: usize = 0;
         while (k < pieces and bad == null) : (k += 1) {
-            const src = copy.host.bytes.ptr + kv_off + k * m.at * row;
+            // The slot's rows hold tokens [p*ptok, p*ptok+rows); the copy holds tokens
+            // [0, at). Compare against the copy's rows for THIS page's tokens -- a copy
+            // window starting at token 0 would compare page p against the wrong rows.
+            const src = copy.host.bytes.ptr + kv_off + (k * m.at + p * ptok) * row;
             const got = buf[k * pitch ..][0 .. rows * row];
             var by: usize = 0;
             while (by < got.len) : (by += 1) {
