@@ -88,8 +88,17 @@ def main():
     # showed r1+ corr~0); torch_recurrent_gated_delta_rule is the definition, same math
     # as the engine's keep kernel (state[k,v]: S*=g; mem=S.k; S+=k*(beta*(v-mem))).
     import transformers.models.qwen3_5_moe.modeling_qwen3_5_moe as MM
-    MM.chunk_gated_delta_rule = MM.torch_recurrent_gated_delta_rule
-    MM.torch_chunk_gated_delta_rule = MM.torch_recurrent_gated_delta_rule
+    # 2026-11-12 verdict: naive torch_recurrent gives CORRECT final states but WRONG
+    # per-position outputs (only layer-0 state correlates -> every downstream layer
+    # gets garbage input). Use fla's fused chunk kernel (verified on this GPU) for
+    # BOTH output and state; env HFREF_NAIVE=1 reverts to the naive path.
+    if os.environ.get("HFREF_NAIVE") == "1":
+        MM.chunk_gated_delta_rule = MM.torch_recurrent_gated_delta_rule
+        MM.torch_chunk_gated_delta_rule = MM.torch_recurrent_gated_delta_rule
+    else:
+        from fla.ops.gated_delta_rule import chunk_gated_delta_rule as _fla_chunk
+        MM.chunk_gated_delta_rule = _fla_chunk
+        MM.torch_chunk_gated_delta_rule = _fla_chunk
     rec_captured = {}
     cache_holder = {}
     def run_fwd():
