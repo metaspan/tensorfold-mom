@@ -688,7 +688,7 @@ fn controlCheck(e: *Engine, io: std.Io, copy: *Copy, prompt: []const u32, g: Geo
     if (copy.dev != null) return; // host-backed only (TF_MOM_ADOPT_HOST)
     const st = @min(g.stateBytes(), copy.host.bytes.len);
     var namebuf: [64]u8 = undefined;
-    const name = std.fmt.bufPrint(&namebuf, "/tmp/tf_mom_ctl_{d}_{d}.bin", .{ prompt.len, copy.at }) catch return;
+    const name = std.fmt.bufPrint(&namebuf, "/tmp/tf_mom_ctl_{d}_{d}_L{d}.bin", .{ prompt.len, copy.at, g.layers }) catch return;
     const src = copy.host.bytes[0..st];
     const cwd = std.Io.Dir.cwd();
     if (cwd.openFile(io, name, .{})) |fh| {
@@ -796,7 +796,7 @@ pub fn adoptMiss(ptr: *anyopaque, owner: ?*anyopaque, prompt: []const u32) anyer
     // still non-finite => the bug is in the resume, not the bytes.
     if (std.c.getenv("TF_MOM_ADOPT_OWN_BYTES") != null and b.copy.dev == null) {
         var namebuf: [64]u8 = undefined;
-        const name = std.fmt.bufPrint(&namebuf, "/tmp/tf_mom_ctl_{d}_{d}.bin", .{ prompt.len, b.map.at }) catch return null;
+        const name = std.fmt.bufPrint(&namebuf, "/tmp/tf_mom_ctl_{d}_{d}_L{d}.bin", .{ prompt.len, b.map.at, t.e.g.layers }) catch return null;
         const st = @min(t.e.g.stateBytes(), b.copy.host.bytes.len);
         const cwd = std.Io.Dir.cwd();
         if (cwd.openFile(t.io, name, .{})) |fh| {
