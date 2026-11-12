@@ -102,8 +102,7 @@ pub fn planLine(a: std.mem.Allocator, models: []const ModelPlan, cap: Capacity) 
     for (models) |m| {
         try w.print(
             " {s} weights={d:.1}GiB {d}streams x {d:.1}GiB quota={d:.1}GiB{s}",
-            .{ m.id, @as(f64, @floatFromInt(m.weights)) / gib, m.streams, @as(f64, @floatFromInt(m.stream_bytes)) / gib,
-               @as(f64, @floatFromInt(quota(m, cap.slack_per_model))) / gib, if (m.pinned) " pinned" else "" },
+            .{ m.id, @as(f64, @floatFromInt(m.weights)) / gib, m.streams, @as(f64, @floatFromInt(m.stream_bytes)) / gib, @as(f64, @floatFromInt(quota(m, cap.slack_per_model))) / gib, if (m.pinned) " pinned" else "" },
         );
     }
     try w.print(
@@ -122,8 +121,14 @@ test "plan passes a pair that fits and quotes each model its need" {
     };
     const cap = Capacity{ .free = 100 * gib, .reserve = 12 * gib };
     const d = try plan(std.testing.allocator, &models, cap);
-    defer switch (d) { .pass => |q| std.testing.allocator.free(q), .refused => |w| std.testing.allocator.free(w) };
-    const q = switch (d) { .pass => |x| x, .refused => return error.UnexpectedRefusal };
+    defer switch (d) {
+        .pass => |q| std.testing.allocator.free(q),
+        .refused => |w| std.testing.allocator.free(w),
+    };
+    const q = switch (d) {
+        .pass => |x| x,
+        .refused => return error.UnexpectedRefusal,
+    };
     try std.testing.expectEqual(@as(usize, 2), q.len);
     try std.testing.expectEqualStrings("qwen3.5-2b", q[0].id);
     try std.testing.expect(q[0].pinned);
@@ -139,8 +144,14 @@ test "plan refuses an over-budget pair naming the dominating model and term" {
     };
     const cap = Capacity{ .free = 100 * gib, .reserve = 12 * gib };
     const d = try plan(std.testing.allocator, &models, cap);
-    defer switch (d) { .pass => |q| std.testing.allocator.free(q), .refused => |w| std.testing.allocator.free(w) };
-    const why = switch (d) { .refused => |w| w, .pass => return error.ExpectedRefusal };
+    defer switch (d) {
+        .pass => |q| std.testing.allocator.free(q),
+        .refused => |w| std.testing.allocator.free(w),
+    };
+    const why = switch (d) {
+        .refused => |w| w,
+        .pass => return error.ExpectedRefusal,
+    };
     try std.testing.expect(std.mem.indexOf(u8, why, "whale") != null);
     try std.testing.expect(std.mem.indexOf(u8, why, "streams x KV") != null); // 8 x 16 GiB of KV dominates its 10 GiB of weights
     try std.testing.expect(std.mem.indexOf(u8, why, "process reserve") != null);
@@ -155,13 +166,25 @@ test "plan charges the process reserve once, not per model: the exact-fit bounda
         .{ .id = "b", .weights = 1 * gib, .streams = 1, .stream_bytes = per, .drafts = false, .pinned = false },
     };
     const d = try plan(std.testing.allocator, &models, .{ .free = 100 * gib, .reserve = 12 * gib, .slack_per_model = slack });
-    defer switch (d) { .pass => |q| std.testing.allocator.free(q), .refused => |w| std.testing.allocator.free(w) };
-    _ = switch (d) { .pass => |q| q, .refused => return error.ExpectedPassAtExactFit };
+    defer switch (d) {
+        .pass => |q| std.testing.allocator.free(q),
+        .refused => |w| std.testing.allocator.free(w),
+    };
+    _ = switch (d) {
+        .pass => |q| q,
+        .refused => return error.ExpectedPassAtExactFit,
+    };
     // three of them refuse: the third adds need with no reserve saving left to matter
     const three = [_]ModelPlan{ models[0], models[1], models[0] };
     const d3 = try plan(std.testing.allocator, &three, .{ .free = 100 * gib, .reserve = 12 * gib, .slack_per_model = slack });
-    defer switch (d3) { .pass => |q| std.testing.allocator.free(q), .refused => |w| std.testing.allocator.free(w) };
-    _ = switch (d3) { .refused => |w| w, .pass => return error.ExpectedRefusalForThree };
+    defer switch (d3) {
+        .pass => |q| std.testing.allocator.free(q),
+        .refused => |w| std.testing.allocator.free(w),
+    };
+    _ = switch (d3) {
+        .refused => |w| w,
+        .pass => return error.ExpectedRefusalForThree,
+    };
 }
 
 test "plan saturates instead of wrapping: absurd sizes refuse" {
@@ -169,8 +192,14 @@ test "plan saturates instead of wrapping: absurd sizes refuse" {
         .{ .id = "absurd", .weights = std.math.maxInt(u64) - 1, .streams = std.math.maxInt(u32), .stream_bytes = std.math.maxInt(u32), .drafts = false, .pinned = false },
     };
     const d = try plan(std.testing.allocator, &models, .{ .free = 100 * gib, .reserve = 12 * gib });
-    defer switch (d) { .pass => |q| std.testing.allocator.free(q), .refused => |w| std.testing.allocator.free(w) };
-    _ = switch (d) { .refused => |w| w, .pass => return error.ExpectedRefusal };
+    defer switch (d) {
+        .pass => |q| std.testing.allocator.free(q),
+        .refused => |w| std.testing.allocator.free(w),
+    };
+    _ = switch (d) {
+        .refused => |w| w,
+        .pass => return error.ExpectedRefusal,
+    };
 }
 
 test "planLine names every model, the single reserve, and the free room" {

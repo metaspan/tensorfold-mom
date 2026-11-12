@@ -95,7 +95,7 @@ test "kvdump: an fp8 cache's e4m3 rows decode through their per-row scales into 
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const m = try metaOf(a, .fp8, &.{ 3 }, 3, 1); // one attention layer, one head, three positions
+    const m = try metaOf(a, .fp8, &.{3}, 3, 1); // one attention layer, one head, three positions
     const copy = try a.alloc(u8, kvdump.copyBytes(.fp8, 1, 1, 3));
     @memset(copy, 0);
     const rows = kvdump.copyPiece(.fp8, 3, 0);
@@ -107,12 +107,12 @@ test "kvdump: an fp8 cache's e4m3 rows decode through their per-row scales into 
     const bytes = try kvdump.buildBin(a, m, copy);
     const h = try kvdump.parseHeader(bytes);
     try testing.expectEqual(@as(u32, 1), h.elem); // rows land as f32
-    const f: [*]const f32 = @alignCast(@ptrCast(bytes.ptr + h.header_bytes));
+    const f: [*]const f32 = @ptrCast(@alignCast(bytes.ptr + h.header_bytes));
     try testing.expectEqual(@as(f32, 2.0), f[0]);
     try testing.expectEqual(@as(f32, 0.0), f[kvdump.head_dim]);
     try testing.expectEqual(@as(f32, -2.0), f[2 * kvdump.head_dim]);
     // every other element of this copy is a zero row times a 2.0 scale
-    for (0 .. 3 * kvdump.head_dim) |i| {
+    for (0..3 * kvdump.head_dim) |i| {
         const want: f32 = if (i == 0) 2.0 else if (i == 2 * kvdump.head_dim) -2.0 else 0.0;
         try testing.expectEqual(want, f[i]);
     }
@@ -156,7 +156,7 @@ test "kvdump: buildBin survives the device build's SafeAllocator (alignedAlloc f
     var safe: std.heap.SafeAllocator = .init(testing.allocator, .{ .block_size_log2 = 12, .bucket_size_log2 = 12 });
     defer _ = safe.deinit();
     const a = safe.allocator();
-    const m = try metaOf(a, .fp8, &.{ 3 }, 3, 1);
+    const m = try metaOf(a, .fp8, &.{3}, 3, 1);
     const copy = try a.alloc(u8, kvdump.copyBytes(.fp8, 1, 1, 3));
     @memset(copy, 0);
     const bytes = try kvdump.buildBin(a, m, copy);
