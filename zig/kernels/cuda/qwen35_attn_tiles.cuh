@@ -110,8 +110,10 @@ struct Bf16Tiles {
         arena = reinterpret_cast<const __nv_bfloat16*>(sg.kv);
         page = TfQ35PageRun{reinterpret_cast<const int*>(sg.pt), sg.ptok, -1, sg.ps, 0};
         // MoM M4 shared view: the first `shp` logical pages resolve into the parent arena.
+        // The ids come from the view's OWN table (skvi): the thin page table (pt) is
+        // reuploaded from the lease's ids on growth and resume and would clobber parent ids.
         sharena = reinterpret_cast<const __nv_bfloat16*>(sg.skv);
-        shpage = TfQ35PageRun{reinterpret_cast<const int*>(sg.pt), sg.ptok, -1, sg.sps, 0};
+        shpage = TfQ35PageRun{reinterpret_cast<const int*>(sg.skvi), sg.ptok, -1, sg.sps, 0};
         shp_ = sg.shp;
         lblk = (size_t)layer * 2 * kvh * sg.ptok * HD;
         hoff = (size_t)h * sg.ptok;
