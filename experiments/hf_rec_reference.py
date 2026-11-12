@@ -8,7 +8,7 @@ against the two engine control files:
 The engine values at heads 23-31 disagree between the two files
 (parent ~1e-3, nested ~O(1)); eager HF says which one is arithmetically right.
 """
-import sys, json
+import os, sys, json
 sys.path.insert(0, "/home/derek/tensorfold-mom/src/tensorfold/experiments")
 import numpy as np
 import torch
