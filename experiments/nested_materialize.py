@@ -102,8 +102,8 @@ def main():
                                      f.get_tensor(f"{name}_scale_2"))
             if t.dtype == torch.float8_e4m3fn:
                 out = t.to(torch.float32)
-                if f"{name}_weight_scale" in keys:
-                    out = out * f.get_tensor(f"{name}_weight_scale").to(torch.float32)
+                if f"{name}_scale" in keys:
+                    out = out * f.get_tensor(f"{name}_scale").to(torch.float32)
                 return out.to(torch.bfloat16)
             return t.to(torch.bfloat16)
 
