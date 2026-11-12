@@ -444,7 +444,7 @@ pub const AdoptMap = struct {
         const nl: Layout = .{ .g = ng, .format = fmt, .cap = 0, .at = at };
         var w = std.ArrayList(Write).initCapacity(gpa, nl.count()) catch return null;
         w.appendAssumeCapacity(.{ .src = 0, .len = dn * region, .piece = 0 });
-        var off: usize = pg.stateBytes(); // pieces after 0 lie past the state block
+        var off: usize = pg.stateBytes(); // copies are PACKED by piece .len (restoreCache's `off += p.len` convention)
         for (1..nl.count()) |i| {
             const np = nl.piece(i);
             w.appendAssumeCapacity(.{ .src = off, .len = np.len, .piece = i });
@@ -583,8 +583,8 @@ fn adoptVerify(ne: *Engine, cache: *const Cache, copy: *Copy, m: *const AdoptMap
         while (k < p.len and buf[k] == src[k]) : (k += 1) {}
         if (k == p.len) ok_pieces += 1 else {
             const take = @min(@as(usize, 16), p.len - k);
-            var dh = [_]u8{0} ** 16;
-            var sh = [_]u8{0} ** 16;
+            var dh = std.mem.zeroes([16]u8);
+            var sh = std.mem.zeroes([16]u8);
             @memcpy(dh[0..take], buf[k..][0..take]);
             @memcpy(sh[0..take], src[k..][0..take]);
             std.log.warn(
