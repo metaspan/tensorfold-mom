@@ -118,7 +118,28 @@ def main() -> int:
         print(f"epoch {ep+1}: mean loss {tot_loss/max(n,1):.4f} over {n} rows")
 
     os.makedirs(args.out_dir, exist_ok=True)
-    model.save_pretrained(args.out_dir, safe_serialization=True)
+    # Stream-save tensor-by-tensor: save_pretrained's single 27 GiB shard materialized
+    # the whole file in CPU RAM and tripped the worker-scope cgroup OOM (SIGKILL 143).
+    # safetensors.torch.save_file still buffers one shard, so write small per-group shards
+    # plus an index, keeping anon RSS bounded.
+    import re as _re
+    from safetensors.torch import save_file as _save_file
+    sd = model.state_dict()  # references only; CPU copies happen one group at a time
+    groups: dict = {}
+    for k in sd:
+        m = _re.search(r"layers\.(\d+)\.", k)
+        groups.setdefault(m.group(1) if m else "rest", []).append(k)
+    total = sum(t.numel() * t.element_size() for t in sd.values())
+    index = {"metadata": {"total_size": total}, "weight_map": {}}
+    for gi, (gname, keys) in enumerate(sorted(groups.items())):
+        shard = {k: sd[k].detach().cpu().contiguous() for k in keys}
+        fname = f"model-{gi:05d}-of-{len(groups):05d}.safetensors"
+        _save_file(shard, os.path.join(args.out_dir, fname), metadata={"format": "pt"})
+        for k in keys:
+            index["weight_map"][k] = fname
+        del shard
+        print(f"saved {fname} ({len(keys)} tensors)")
+    json.dump(index, open(os.path.join(args.out_dir, "model.safetensors.index.json"), "w"))
     tok.save_pretrained(args.out_dir)
     # record provenance so M3 can gate on the frozen digest staying unchanged
     meta = {"frozen_layers": FROZEN_LAYERS, "trainable": len(trainable),
