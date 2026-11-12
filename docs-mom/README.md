@@ -53,6 +53,10 @@ under `experiments/`, or a log in `notes/`.
 - `docs/13` — nested-upcycle work spec (extraction, GDN head duplication 16v→32v, distillation recipe).
 - `docs/14` — M4 SharedView design (page-table shared-cache view in `cuda_cache.zig`).
 - `notes/` — exploration maps and raw build/test logs from the B-series baselines.
+- `../experiments/README.md` — the reproduction index: every gate above, its
+  criterion, and the exact command to re-run it (the harness lives in
+  `experiments/`, not here — it's live tooling, and `nested_extract.py` is the
+  only thing that should ever lay bytes on our NVFP4 checkpoints).
 
 ## Attribution
 
