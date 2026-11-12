@@ -821,19 +821,71 @@ pub fn adoptMiss(ptr: *anyopaque, owner: ?*anyopaque, prompt: []const u32) anyer
     }
     var b = best orelse return null;
     defer b.map.free(t.e.gpa);
-    // Experiment (TF_MOM_ADOPT_OWN_BYTES): overwrite the state block in the parent copy with
-    // THIS engine's own cold-save bytes (persisted by the determinism control) before adopting.
-    // Finite decode => the resume path is sound and parent-specific bytes were the poison;
-    // still non-finite => the bug is in the resume, not the bytes.
-    if (std.c.getenv("TF_MOM_ADOPT_OWN_BYTES") != null and b.copy.dev == null) {
-        var namebuf: [64]u8 = undefined;
-        const name = std.fmt.bufPrint(&namebuf, "/tmp/tf_mom_ctl_{d}_{d}_L{d}.bin", .{ prompt.len, b.map.at, t.e.g.layers }) catch return null;
+    // Diagnostic (TF_MOM_ADOPT_COLDIFF=N): before adoption, diff the parent's state block against
+    // THIS engine's own cold save (the determinism control file) and report the first N differing
+    // f32 words with their region/rec-head coordinates and both values -- tells ULP divergence from
+    // garbage magnitudes, which the non-finite scan alone cannot.
+    if (std.c.getenv("TF_MOM_ADOPT_COLDIFF")) |cv| {
+        const nmax = std.fmt.parseInt(usize, std.mem.span(cv), 10) catch 4;
+        var cname: [64]u8 = undefined;
+        const name = std.fmt.bufPrint(&cname, "/tmp/tf_mom_ctl_{d}_{d}_L{d}.bin", .{ prompt.len, b.map.at, t.e.g.layers }) catch return null;
         const st = @min(t.e.g.stateBytes(), b.copy.host.bytes.len);
+        const cold = t.e.gpa.alloc(u8, st) catch return null;
+        defer t.e.gpa.free(cold);
+        const cdir = std.Io.Dir.cwd();
+        if (cdir.openFile(t.io, name, .{})) |fh| {
+            defer fh.close(t.io);
+            if (fh.readPositionalAll(t.io, cold, 0)) |_| {
+                const region = t.e.g.recBytes() + t.e.g.convBytes();
+                const hw = @max(t.e.g.recBytes() / 4 / 32, 1);
+                const base: [*]const u8 = @ptrCast(b.copy.host.bytes.ptr);
+                var diffs: usize = 0;
+                var shown: usize = 0;
+                var w: usize = 0;
+                while (w < st / 4) : (w += 1) {
+                    const p = std.mem.bytesToValue(f32, base[w * 4 ..][0..4]);
+                    const c = std.mem.bytesToValue(f32, cold[w * 4 ..][0..4]);
+                    if (@as(u32, @bitCast(p)) == @as(u32, @bitCast(c))) continue;
+                    diffs += 1;
+                    if (shown < nmax) {
+                        shown += 1;
+                        const off = w * 4;
+                        const inr = off % region;
+                        if (inr < t.e.g.recBytes()) {
+                            std.log.warn("qwen3_5: adopt coldiff {d}: off {d} region {d} rec head {d} parent {d} cold {d}", .{ shown, off, off / region, (inr / 4) / hw, p, c });
+                        } else {
+                            const pb = std.mem.bytesToValue(u16, base[off..][0..2]);
+                            const cb = std.mem.bytesToValue(u16, cold[off..][0..2]);
+                            std.log.warn("qwen3_5: adopt coldiff {d}: off {d} region {d} conv tap {d} parent {x:0>4} cold {x:0>4}", .{ shown, off, off / region, (inr - t.e.g.recBytes()) / 2, pb, cb });
+                        }
+                    }
+                }
+                std.log.warn("qwen3_5: adopt coldiff: {d} differing f32 words in {d} bytes vs {s}", .{ diffs, st, name });
+            } else |err| std.log.warn("qwen3_5: adopt coldiff: read {s} failed: {}", .{ name, err });
+        } else |err| std.log.warn("qwen3_5: adopt coldiff: open {s} failed: {}", .{ name, err });
+    }
+    // Experiment (TF_MOM_ADOPT_OWN_BYTES=all|regionN): overwrite the state block (or one region)
+    // in the parent copy with THIS engine's own cold-save bytes (persisted by the determinism
+    // control) before adopting. Finite decode => the resume path is sound and parent-specific
+    // bytes were the poison; still non-finite => the bug is in the resume, not the bytes.
+    if (std.c.getenv("TF_MOM_ADOPT_OWN_BYTES")) |ov| ownbytes: {
+        if (b.copy.dev != null) break :ownbytes;
+        const mode = std.mem.span(ov);
+        var namebuf: [64]u8 = undefined;
+        const name = std.fmt.bufPrint(&namebuf, "/tmp/tf_mom_ctl_{d}_{d}_L{d}.bin", .{ prompt.len, b.map.at, t.e.g.layers }) catch break :ownbytes;
         const cwd = std.Io.Dir.cwd();
         if (cwd.openFile(t.io, name, .{})) |fh| {
             defer fh.close(t.io);
-            if (fh.readPositionalAll(t.io, b.copy.host.bytes[0..st], 0)) |_| {
-                std.log.warn("qwen3_5: adopt own-bytes: state block replaced with {s} ({d} bytes)", .{ name, st });
+            const region = t.e.g.recBytes() + t.e.g.convBytes();
+            var off: usize = 0;
+            var st = @min(t.e.g.stateBytes(), b.copy.host.bytes.len);
+            if (std.mem.startsWith(u8, mode, "region")) {
+                const r = std.fmt.parseInt(usize, mode[6..], 10) catch 0;
+                off = r * region;
+                st = @min(region, b.copy.host.bytes.len - off);
+            }
+            if (fh.readPositionalAll(t.io, b.copy.host.bytes[off..][0..st], off)) |_| {
+                std.log.warn("qwen3_5: adopt own-bytes: {s} bytes at {d} from {s}", .{ mode, off, name });
             } else |err| std.log.warn("qwen3_5: adopt own-bytes: read {s} failed: {}", .{ name, err });
         } else |err| std.log.warn("qwen3_5: adopt own-bytes: open {s} failed: {}", .{ name, err });
     }

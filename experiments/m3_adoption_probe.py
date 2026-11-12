@@ -170,11 +170,15 @@ def main() -> int:
     # determinism from the cold-prefill ULP noise the control proved.
     adopt_list: list[str] = []
     ctl_present = bool(_glob.glob("/tmp/tf_mom_ctl_*.bin"))
-    for _round in range(2 + (1 if ctl_present else 0)):
+    for _round in range(2 + (2 if ctl_present else 0)):
         benv = {"TF_MOM_ADOPT": "1", "TF_MOM_ADOPT_HOST": "1", "TF_MOM_ADOPT_VERIFY": "1",
                 "TF_MOM_ADOPT_SANITIZE": "1"}
+        if ctl_present:
+            benv["TF_MOM_ADOPT_COLDIFF"] = "8"
         if _round == 2:  # diagnostic: state block replaced by the nested engine's own cold save
-            benv["TF_MOM_ADOPT_OWN_BYTES"] = "1"
+            benv["TF_MOM_ADOPT_OWN_BYTES"] = "all"
+        if _round == 3:  # localize: replace ONLY region 11 (last linear region of the thin engine)
+            benv["TF_MOM_ADOPT_OWN_BYTES"] = "region11"
         p = boot(benv)
         if p is None:
             break
