@@ -132,26 +132,31 @@ def main() -> int:
     # long prompt, cold for the nested store, warm in the parent's sink). Replaying
     # every turn self-hits the nested store and adoption can never fire (run 1:
     # hits 7, misses 1 -- the lone cold miss was turn 1, too short vs the deep sink).
-    p = boot({"TF_MOM_ADOPT": "1", "TF_MOM_ADOPT_HOST": "1", "TF_MOM_ADOPT_VERIFY": "1"})
-    if p is None:
-        return 2
-    adopt = ["<boot-failed>"]
-    try:
-        _ = replay(BIG_NAME, user_turns, replies)  # parent prefills the whole conversation
-        hist = [{"role": "system", "content": SYSTEM}]
-        for i, c in enumerate(user_turns):
-            hist.append({"role": "user", "content": c})
-            if i + 1 < len(user_turns):
-                hist.append({"role": "assistant", "content": replies[i]})
+    # Run TWICE (determinism re-test, post off-by-one fix): the same sink bytes adopted
+    # in two boots must yield byte-identical replies -- that isolates resume+decode
+    # determinism from the cold-prefill ULP noise the control proved.
+    adopt_list: list[str] = []
+    for _round in range(2):
+        p = boot({"TF_MOM_ADOPT": "1", "TF_MOM_ADOPT_HOST": "1", "TF_MOM_ADOPT_VERIFY": "1"})
+        if p is None:
+            break
         try:
-            r = post({"model": NESTED_NAME, "messages": hist, "max_tokens": 24, "temperature": 0,
-                      "stream": False, "chat_template_kwargs": {"enable_thinking": False}})
-            adopt = [r["choices"][0]["message"]["content"]]
-        except Exception as e:  # an adopted 500 is a FAIL to diagnose, not a traceback
-            adopt = [f"<error {e}>"]
-    finally:
-        kill(p)
-    time.sleep(4)
+            _ = replay(BIG_NAME, user_turns, replies)  # parent prefills the whole conversation
+            hist = [{"role": "system", "content": SYSTEM}]
+            for i, c in enumerate(user_turns):
+                hist.append({"role": "user", "content": c})
+                if i + 1 < len(user_turns):
+                    hist.append({"role": "assistant", "content": replies[i]})
+            try:
+                r = post({"model": NESTED_NAME, "messages": hist, "max_tokens": 24, "temperature": 0,
+                          "stream": False, "chat_template_kwargs": {"enable_thinking": False}})
+                adopt_list.append(r["choices"][0]["message"]["content"])
+            except Exception as e:  # an adopted 500 is a FAIL to diagnose, not a traceback
+                adopt_list.append(f"<error {e}>")
+        finally:
+            kill(p)
+        time.sleep(4)
+    adopt = adopt_list or ["<boot-failed>"]
 
     # C. audit-only boot, run TWICE: the same conversation goes to the parent (sink) then to the
     # nested engine COLD (adoption suppressed). Its cold save at the same cut compares
@@ -202,19 +207,24 @@ def main() -> int:
     # docs/13), so byte-equal replies across engines are NOT expected until the tail
     # is trained; reply equality is reported, required post-G2.
     adopted_ok = adopt[0] == base[-1]
-    finite = not adopt[0].startswith("<error") and len(adopt[0]) > 0
+    finite = all(not a.startswith("<error") and len(a) > 0 for a in adopt_list) and len(adopt_list) == 2
+    deterministic = finite and adopt_list[0] == adopt_list[1]
     if not adopted_lines:
         print("G3: NOT RUN -- server logged no 'adopt' lines (wiring absent?); "
               "refusing to call this PASS")
         return 3
     if not finite:
-        print(f"G3 decode-resume gate: FAIL (adopted request errored: {adopt[0]!r})")
+        print(f"G3 decode-resume gate: FAIL (adopted request errored: {adopt_list!r})")
         return 1
-    print(f"G3 decode-resume gate: PASS (adoption fired x{len(adopted_lines)}, decode finite)"
-          f"; reply==baseline: {'yes' if adopted_ok else 'no (expected pre-G2)'}")
+    if not deterministic:
+        print(f"G3 decode-resume gate: FAIL (same adopted bytes, differing replies: {adopt_list!r})")
+        return 1
+    print(f"G3 decode-resume gate: PASS (adoption fired x{len(adopted_lines)}, decode finite, "
+          f"adopted replies byte-identical across boots); reply==baseline: "
+          f"{'yes' if adopted_ok else 'no (expected pre-G2)'}")
     if not adopted_ok:
         print(f"  baseline: {base[-1]!r}\n  adopted : {adopt[0]!r}")
-    return 0 if finite else 1
+    return 0
 
 
 if __name__ == "__main__":

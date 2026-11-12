@@ -595,6 +595,41 @@ fn adoptVerify(ne: *Engine, cache: *const Cache, copy: *Copy, m: *const AdoptMap
         }
     }
     std.log.warn("qwen3_5: adopt verify: {d} of {d} device pieces match the copy", .{ ok_pieces, n_pieces });
+    // scan the state block's fp32 recurrences AND bf16 conv tails, plus every KV piece, for
+    // non-finite values: a NaN/Inf that rode in with the parent's bytes would explain a
+    // finite-bytes, nonfinite-decode paradox.
+    var bad_total: usize = 0;
+    var first_where: [96]u8 = undefined;
+    var first_len: usize = 0;
+    const base_src: [*]const u8 = @ptrCast(copy.host.bytes.ptr);
+    {
+        const rec_bytes = ne.g.deltas() * ne.g.recBytes();
+        const rec = @as([*]const f32, @alignCast(@ptrCast(base_src + m.writes[0].src)))[0 .. rec_bytes / 4];
+        for (rec, 0..) |v, el| {
+            if (!std.math.isFinite(v)) {
+                bad_total += 1;
+                if (first_len == 0) first_len = (std.fmt.bufPrint(&first_where, "rec f32 element {d} region {d}", .{ el, el * 4 / (ne.g.recBytes() | 1) }) catch return).len;
+            }
+        }
+        const tail = base_src[m.writes[0].src + rec_bytes ..][0 .. l.piece(0).len - rec_bytes];
+        const conv = @as([*]const u16, @alignCast(@ptrCast(tail.ptr)))[0 .. tail.len / 2];
+        for (conv, 0..) |v, ci| {
+            if ((v & 0x7F80) == 0x7F80 and (v & 0x007F) != 0) {
+                bad_total += 1;
+                if (first_len == 0) first_len = (std.fmt.bufPrint(&first_where, "conv bf16 element {d}", .{ci}) catch return).len;
+            }
+        }
+    }
+    for (1..m.writes.len) |pi| {
+        const rows = @as([*]const u16, @alignCast(@ptrCast(base_src + m.writes[pi].src)))[0 .. m.writes[pi].len / 2];
+        for (rows, 0..) |v, j| {
+            if ((v & 0x7F80) == 0x7F80 and (v & 0x007F) != 0) {
+                bad_total += 1;
+                if (first_len == 0) first_len = (std.fmt.bufPrint(&first_where, "kv piece {d} row {d}", .{ pi, j }) catch return).len;
+            }
+        }
+    }
+    std.log.warn("qwen3_5: adopt verify scan: {d} nonfinite in copy; first: {s}", .{ bad_total, first_where[0..first_len] });
 }
 
 /// Live qwen3_5 lane targets (registered by cuda_native.zig); the pair is found at adopt time, never wired at open.
