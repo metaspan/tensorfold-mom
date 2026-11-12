@@ -58,10 +58,6 @@ def main():
     for u, a in zip(turns, replies):
         hist.append({"role": "user", "content": u})
         hist.append({"role": "assistant", "content": a})
-    text = tok.apply_chat_template(hist, add_generation_prompt=False,
-                                   enable_thinking=False, tokenizer=False)
-    if isinstance(text, list):
-        text = text[0]
 
     # 2) boot engine single-lane with kvdump
     os.makedirs(DUMPDIR, exist_ok=True)
@@ -86,8 +82,9 @@ def main():
         p.terminate()
         return 2
     try:
-        r = post("/v1/completions", {"model": "nested", "prompt": text,
-                                     "max_tokens": 1, "temperature": 0, "logprobs": 5})
+        r = post("/v1/chat/completions", {"model": "nested", "messages": hist,
+                                          "max_tokens": 1, "temperature": 0, "logprobs": 5,
+                                          "chat_template_kwargs": {"enable_thinking": False}})
     finally:
         p.terminate()
         try:
@@ -95,38 +92,40 @@ def main():
         except subprocess.TimeoutExpired:
             p.kill()
     choice = r["choices"][0]
-    eng_tok = tok.encode(choice["text"], add_special_tokens=False)
-    top = choice.get("logprobs", {}).get("top_logprobs", [{}])[0]
-    eng_top = sorted(((v, k) for k, v in top.items()), reverse=True)[:5]
-    print("engine completion-token ids:", eng_tok)
-    print("engine top5:", [(t, round(v, 4)) for v, t in eng_top])
+    eng_text = choice["text"]
+    top = (choice.get("logprobs") or {}).get("top_logprobs", [{}])[0]
+    eng_top = sorted(top.items(), key=lambda kv: -kv[1])[:5]
+    print("engine completion text:", repr(eng_text))
+    print("engine top5 (token,logprob):", [(t, round(v, 4)) for t, v in eng_top])
 
     # 3) token identity proof via the engine's own dump
     ck2 = load_model_dir(DUMPDIR)
     items2 = list(ck2.values()) if isinstance(ck2, dict) else list(ck2)
     got = list(items2[-1].token_ids)
-    same = got == want
-    print(f"engine tokenized the rendered text to the same {len(want)} tokens: {same}")
+    same = got[:179] == want
+    print(f"engine prompt tokens: {len(got)}; first 179 == kept-state stream: {same}")
     if not same:
         print("engine ids:", got[:10], "...")
         print("want  ids:", want[:10], "...")
+        return 3
 
-    # 4) HF logits on the same 179 ids
+    # 4) HF logits on the same token stream the engine saw
     from transformers import AutoModelForCausalLM
     model = AutoModelForCausalLM.from_pretrained(STUDENT, dtype=torch.bfloat16,
                                                  low_cpu_mem_usage=True)
     model.to("cuda")
     model.eval()
     with torch.no_grad():
-        out = model(torch.tensor([want], device="cuda"), use_cache=False)
+        out = model(torch.tensor([got], device="cuda"), use_cache=False)
     logits = out.logits[0, -1].float()
     lp = torch.log_softmax(logits, dim=-1)
     vals, idx = torch.topk(lp, 5)
-    hf_top = [(int(i), round(float(v), 4)) for i, v in zip(idx, vals)]
-    print("hf top5:", hf_top)
+    hf_top = [(tok.convert_ids_to_tokens(int(i)), round(float(v), 4)) for i, v in zip(idx, vals)]
+    print("hf top5 (token,logprob):", hf_top)
     arg = int(logits.argmax())
-    print("HF argmax:", arg, "| engine first completion token:", eng_tok[0] if eng_tok else None)
-    print("LOGITS-GATE-DONE tokens_match =", same)
+    print("HF argmax token:", repr(tok.decode([arg])), "| engine completion:", repr(eng_text))
+    agree = tok.decode([arg]) == eng_text
+    print("LOGITS-GATE-DONE tokens_match =", same, "argmax_agree =", agree)
     return 0
 
 
