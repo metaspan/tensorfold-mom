@@ -83,7 +83,7 @@ def main():
         return 2
     try:
         r = post("/v1/chat/completions", {"model": "nested", "messages": hist,
-                                          "max_tokens": 1, "temperature": 0, "logprobs": 5,
+                                          "max_tokens": 12, "temperature": 0,
                                           "chat_template_kwargs": {"enable_thinking": False}})
     finally:
         p.terminate()
@@ -93,10 +93,7 @@ def main():
             p.kill()
     choice = r["choices"][0]
     eng_text = choice["text"]
-    top = (choice.get("logprobs") or {}).get("top_logprobs", [{}])[0]
-    eng_top = sorted(top.items(), key=lambda kv: -kv[1])[:5]
-    print("engine completion text:", repr(eng_text))
-    print("engine top5 (token,logprob):", [(t, round(v, 4)) for t, v in eng_top])
+    print("engine completion (12 greedy tokens):", repr(eng_text))
 
     # 3) token identity proof via the engine's own dump
     ck2 = load_model_dir(DUMPDIR)
@@ -109,23 +106,29 @@ def main():
         print("want  ids:", want[:10], "...")
         return 3
 
-    # 4) HF logits on the same token stream the engine saw
+    # 4) HF greedy continuation on the engine's own prompt tokens
     from transformers import AutoModelForCausalLM
     model = AutoModelForCausalLM.from_pretrained(STUDENT, dtype=torch.bfloat16,
                                                  low_cpu_mem_usage=True)
     model.to("cuda")
     model.eval()
+    ids = torch.tensor([got], device="cuda")
+    hf_ids = []
     with torch.no_grad():
-        out = model(torch.tensor([got], device="cuda"), use_cache=False)
-    logits = out.logits[0, -1].float()
-    lp = torch.log_softmax(logits, dim=-1)
-    vals, idx = torch.topk(lp, 5)
-    hf_top = [(tok.convert_ids_to_tokens(int(i)), round(float(v), 4)) for i, v in zip(idx, vals)]
-    print("hf top5 (token,logprob):", hf_top)
-    arg = int(logits.argmax())
-    print("HF argmax token:", repr(tok.decode([arg])), "| engine completion:", repr(eng_text))
-    agree = tok.decode([arg]) == eng_text
-    print("LOGITS-GATE-DONE tokens_match =", same, "argmax_agree =", agree)
+        for _ in range(12):
+            out = model(ids, use_cache=False)
+            nxt = int(out.logits[0, -1].float().argmax())
+            hf_ids.append(nxt)
+            ids = torch.cat([ids, torch.tensor([[nxt]], device="cuda")], dim=1)
+    eng_ids = tok.encode(eng_text, add_special_tokens=False)
+    print("hf   ids:", hf_ids)
+    print("eng  ids:", eng_ids)
+    div = next((i for i, (h, e) in enumerate(zip(hf_ids, eng_ids)) if h != e),
+               min(len(hf_ids), len(eng_ids)))
+    print("hf   text:", repr(tok.decode(hf_ids)))
+    print("eng  text:", repr(eng_text))
+    print(f"first divergence at completion position {div} of {len(eng_ids)}")
+    print("LOGITS-GATE-DONE tokens_match =", same, "agree_len =", div)
     return 0
 
 
