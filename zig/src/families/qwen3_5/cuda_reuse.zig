@@ -821,6 +821,47 @@ pub fn adoptMiss(ptr: *anyopaque, owner: ?*anyopaque, prompt: []const u32) anyer
     }
     var b = best orelse return null;
     defer b.map.free(t.e.gpa);
+    // Policy: state regions whose LAYER is in the checkpoint's trainable tail are semantically
+    // foreign to this engine (tail GDN weights were head-duplicated at extraction, so the parent's
+    // 32-head state there was folded by different matrices). Adoption copies parent bytes; tail
+    // regions must cold-start instead. Frozen frontier read from NESTED.json (frozen_layers),
+    // overridable via TF_MOM_ADOPT_FROZEN_REGIONS for diagnostics. KV pieces are unaffected
+    // (attention layers are all inside the frozen prefix; rows are immutable).
+    if (std.c.getenv("TF_MOM_ADOPT") != null and b.copy.dev == null) tailzero: {
+        var frozen: usize = t.e.g.deltas(); // default: everything is a frozen copy (legacy engines)
+        const cwd0 = std.Io.Dir.cwd();
+        var jbuf: [4096]u8 = undefined;
+        const npath = if (t.e.dir.len + 12 < jbuf.len) blk: {
+            @memcpy(jbuf[0..t.e.dir.len], t.e.dir);
+            jbuf[t.e.dir.len] = '/';
+            @memcpy(jbuf[t.e.dir.len + 1 ..][0..11], "NESTED.json");
+            break :blk jbuf[0 .. t.e.dir.len + 1 + 11];
+        } else "";
+        if (npath.len != 0) {
+            const blob = cwd0.readFileAlloc(t.io, npath, t.e.gpa, .limited(1 << 16)) catch break :tailzero;
+            defer t.e.gpa.free(blob);
+            const key = "\"frozen_layers\":";
+            const k = std.mem.indexOf(u8, blob, key) orelse break :tailzero;
+            var i = k + key.len;
+            while (i < blob.len and (blob[i] == ' ' or blob[i] == '\t')) i += 1;
+            const j = std.mem.indexOfNone(u8, blob[i..], "0123456789") orelse break :tailzero;
+            frozen = std.fmt.parseInt(usize, blob[i .. i + j], 10) catch break :tailzero;
+        }
+        if (std.c.getenv("TF_MOM_ADOPT_FROZEN_REGIONS")) |fv|
+            frozen = std.fmt.parseInt(usize, std.mem.span(fv), 10) catch frozen;
+        const region = t.e.g.recBytes() + t.e.g.convBytes();
+        const total = t.e.g.stateBytes();
+        // regions are ordered by layer; count the linear layers inside the frozen prefix
+        const fl = @min(frozen, t.e.g.layers);
+        var fre: usize = 0;
+        for (t.e.g.linear[0..fl]) |lin| fre += @intFromBool(lin);
+        if (fre < t.e.g.deltas() and b.copy.host.bytes.len >= total) {
+            @memset(b.copy.host.bytes[fre * region .. total], 0);
+            std.log.warn("qwen3_5: adopt tail-zero: regions {d}..{d} cold-started (frozen_layers={d})", .{
+                fre, t.e.g.deltas() - 1, frozen,
+            });
+        }
+    }
     // Diagnostic (TF_MOM_ADOPT_COLDIFF=N): before adoption, diff the parent's state block against
     // THIS engine's own cold save (the determinism control file) and report the first N differing
     // f32 words with their region/rec-head coordinates and both values -- tells ULP divergence from
