@@ -47,13 +47,13 @@ half byte-equal to the first):
                        (2k+v)*128 24 -> 32 rows-channels, k/v sides unchanged
   UNCHANGED:           norm.weight [128], k/v side of qkv + conv
 
-The duplication is applied to ALL linear layers of the thin, not only the tail
-(layers 4-5): the thin's config declares linear_num_value_heads = 16 and
-core.checkpoint's ck.expect() asserts every layer's GDN shapes against that,
-so frozen layers kept at 8 heads would fail to load with a shape mismatch on
-A_log/dt_bias/in_proj_a/b/z/out/qkv/conv. (The real thin escapes this because
-its parent's 32-head GDN layers are themselves block-paired, so dedup->redup
-is byte-exact; a random 8-head toy parent is not.) NESTED.json stays exactly
+The thin keeps the parent's GDN head bytes VERBATIM and declares the parent's
+v_heads exactly (production: 35B 32v <-> nested-16l 32v; toy: 8v both sides),
+because the adoption map requires frozen AND tail GDN regions to be
+byte-size-identical to the parent's. (An earlier revision reduplicated thin
+heads 8v->16v, which doubled thin region sizes and failed the strictly-deeper
+parent gate, so adoption silently never fired; removed 2026-11-12.
+duplicate_thin_heads() is kept unused for M1-specific experiments.) NESTED.json stays exactly
 as nested_extract wrote it: its frozen_prefix_digest is over the PARENT's
 frozen bytes (docs/13 s4), which nothing here rewrites.
 
@@ -78,7 +78,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 PYTHON = "/home/derek/.venv/bin/python"
 NESTED_EXTRACT = os.path.join(HERE, "nested_extract.py")
 SRC_MODEL = "/home/derek/models/tensorfold-mom/qwen36-nested-16l"
-PARENT_DIR = "/home/derek/models/tensorfold-mom/toy-parent-6l"
+PARENT_DIR = "/home/derek/models/tensorfold-mom/toy-parent-8l"
 THIN_DIR = "/home/derek/models/tensorfold-mom/toy-nested-4l"
 
 # the same list nested_extract.py copies (kept in sync by value, read-only)
@@ -90,7 +90,8 @@ LP = "model.language_model.layers."
 # toy geometry (the contract's fixed widths in caps: HEAD_DIM 256, DK 128, taps 4)
 HIDDEN = 512
 INTERMEDIATE = 512
-LAYERS = 6
+PARENT_LAYERS = 8           # parent must be STRICTLY deeper than the thin: the adoption
+LAYERS = 6                  # gate skips any candidate whose layers <= the thin's (reuse.896)
 FULL_ATTN = (2, 5)          # (i+1) % 3 == 0
 INTERVAL = 3
 Q_HEADS = 2
@@ -156,7 +157,7 @@ def raw_of(hdr: dict, data: bytes, name: str) -> bytes:
 
 # ---------------------------------------------------------------------- config
 
-def text_config(v_heads: int, layers: int = LAYERS) -> dict:
+def text_config(v_heads: int, layers: int = PARENT_LAYERS) -> dict:
     layer_types = ["full_attention" if i in FULL_ATTN else "linear_attention"
                    for i in range(layers)]
     assert layer_types[FULL_ATTN[0]] == "full_attention" and layer_types[FULL_ATTN[1]] == "full_attention"
@@ -278,7 +279,7 @@ def parent_tensors() -> dict[str, list[int]]:
         "model.language_model.norm.weight": [HIDDEN],
         "lm_head.weight": [VOCAB, HIDDEN],
     }
-    for i in range(LAYERS):
+    for i in range(PARENT_LAYERS):
         t.update(layer_tensors(i, V_HEADS))
     return t
 
@@ -490,8 +491,14 @@ def main() -> int:
                        capture_output=True, text=True)
     note = t.stdout.strip() or t.stderr.strip().splitlines()[-1:] or [""]
     print(f"gdn_dup --selftest: {'OK' if t.returncode == 0 else 'FAILS ON ITS OWN (known-broken gate, not fatal)'}: {note if isinstance(note, str) else note[-1]}")
-    layers = [i for i in range(a.frozen + a.tail) if i not in FULL_ATTN]
-    duplicate_thin_heads(a.thin_out, layers)
+    # 2026-11-12: the head-dup step is REMOVED for the M4 toy contract. Production
+    # reality (qwen36-35b 32v / qwen36-nested-16l 32v): the thin carries the parent's
+    # GDN head bytes VERBATIM and declares the parent's v_heads exactly -- region sizes
+    # must match byte-for-byte for adoption. The old 8v->16v redup made thin regions
+    # DOUBLE the parent's (the 'short control file (2146304 of 4268032)' mismatch) and
+    # the equal layer counts (6==6) failed the strictly-deeper parent gate (reuse.896),
+    # so adoption silently never fired. M1's dup-coverage belongs to gdn_dup.py's own
+    # tests, not to the M4 identity pair.
     verify_thin(a.thin_out)
     return 0
 
