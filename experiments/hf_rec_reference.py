@@ -15,6 +15,7 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from b5_cache_probe import TRIVIAL_TURNS, WORK_TURNS
+from s1_fit import load_model_dir
 
 STUDENT = "/home/derek/models/tensorfold-mom/qwen36-nested-16l-bf16"
 REPLIES = "/home/derek/tensorfold-mom/experiments/results/m2-tf/parent_replies.json"
@@ -31,20 +32,34 @@ def engrec(path):
     return np.frombuffer(b, dtype=np.float32).reshape(32, 128, 128)
 
 def main():
-    tok = AutoTokenizer.from_pretrained(STUDENT)
-    turns = (TRIVIAL_TURNS + WORK_TURNS)[:TURNS]
-    replies = json.load(open(REPLIES))
-    hist = [{"role": "system", "content": SYSTEM}]
-    for u, a in zip(turns, replies):
-        hist.append({"role": "user", "content": u})
-        hist.append({"role": "assistant", "content": a})
-    hist.append({"role": "user", "content": turns[-1]})
-    ids = tok.apply_chat_template(hist, add_generation_prompt=True,
-                                  enable_thinking=False, return_tensors="pt")
-    n = ids.shape[1]
-    print(f"prompt tokens: {n} (engine saw 186)")
-    assert n == 186, f"tokenization mismatch: {n} != 186"
-    ids = ids[:, :179].to("cuda")
+    # Engine ground truth tokens: the M2-TF nested kvdump's last checkpoint is the
+    # same teacher-forced 8-turn replay -- the exact 186-token hop prompt both engines saw.
+    ck = load_model_dir("/home/derek/tensorfold-mom/experiments/results/m2-tf/kvdump/qwen36-nested-16l")
+    last = sorted(ck, key=lambda c: c.ckpt)[-1] if not isinstance(ck, list) else ck[-1]
+    tok_ids = list(getattr(last, "token_ids", None) if not isinstance(last, dict) else last["token_ids"])
+    n = len(tok_ids)
+    print(f"engine kept-state tokens: {n}, at={getattr(last, 'at', '?')}")
+    assert n == 179 and getattr(last, "at", None) == 179, "dump is not the at=179 kept state"
+    tok_ids = list(tok_ids)
+    ids = torch.tensor([tok_ids[:179]], dtype=torch.long)
+    # informational: HF template rendering of the same hist
+    try:
+        tok = AutoTokenizer.from_pretrained(STUDENT)
+        hist = [{"role": "system", "content": SYSTEM}]
+        tu = (TRIVIAL_TURNS + WORK_TURNS)[:TURNS]
+        rp = json.load(open(REPLIES))
+        for u, a in zip(tu, rp):
+            hist.append({"role": "user", "content": u})
+            hist.append({"role": "assistant", "content": a})
+        hist.append({"role": "user", "content": tu[-1]})
+        enc = tok.apply_chat_template(hist, add_generation_prompt=True,
+                                      enable_thinking=False, return_dict=True)
+        hf_ids = enc["input_ids"]
+        print(f"HF template ids: {len(hf_ids)}; engine prefix match: "
+              f"{sum(a == b for a, b in zip(hf_ids[:186], tok_ids))}/186")
+    except Exception as e:
+        print("HF template info skipped:", e)
+    ids = ids.to("cuda")
 
     model = AutoModelForCausalLM.from_pretrained(STUDENT, dtype=torch.bfloat16,
                                                  device_map="cuda")
@@ -54,14 +69,18 @@ def main():
     cache = out.past_key_values
     states = []
     layers = getattr(cache, "layers", None)
-    if layers is not None:
+    if layers is not None and any(getattr(ly, "recurrent_state", None) is not None for ly in layers):
         for ly in layers:
             rs = getattr(ly, "recurrent_state", None)
             if rs is not None:
                 states.append(rs)
+    elif hasattr(cache, "recur"):
+        for e in cache.recur:
+            if e is not None:
+                states.append(e)
     else:
         rsd = getattr(cache, "recurrent_states", None) or getattr(cache, "slab_states", None)
-        assert rsd is not None, f"unknown cache layout {type(cache)}"
+        assert rsd is not None, f"unknown cache layout {type(cache)}: {[a for a in dir(cache) if not a.startswith('_')]}"
         for e in rsd:
             if e is not None:
                 states.append(e)
