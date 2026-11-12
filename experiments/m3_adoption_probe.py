@@ -27,20 +27,21 @@ import os
 import subprocess
 import sys
 import time
+import urllib.error
 import urllib.request
 
 sys.path.insert(0, "/home/derek/tensorfold-mom/experiments")
 from b5_cache_probe import TRIVIAL_TURNS, WORK_TURNS
 
-BIN = "/home/derek/tensorfold-mom/src/tensorfold/zig-out/native/bin/tensorfold-native"
-NESTED = "/home/derek/models/tensorfold-mom/qwen36-nested-16l"
-BIG = "/home/derek/models/tensorfold-mom/qwen36-35b-a3b-nvfp4"
-NESTED_NAME = "qwen36-nested"
-BIG_NAME = "qwen3.6-35b"
-PORT = 8218
-OUT = "/home/derek/tensorfold-mom/experiments/results/m3"
-REPLIES_FILE = "/home/derek/tensorfold-mom/experiments/results/m2-tf/parent_replies.json"
-LOG = "/tmp/m3-adopt-mom.log"
+BIN = os.environ.get("TFM_BIN", "/home/derek/tensorfold-mom/src/tensorfold/zig-out/native/bin/tensorfold-native")
+NESTED = os.environ.get("TFM_NESTED_DIR", "/home/derek/models/tensorfold-mom/qwen36-nested-16l")
+BIG = os.environ.get("TFM_BIG_DIR", "/home/derek/models/tensorfold-mom/qwen36-35b-a3b-nvfp4")
+NESTED_NAME = os.environ.get("TFM_NESTED_NAME", "qwen36-nested")
+BIG_NAME = os.environ.get("TFM_BIG_NAME", "qwen3.6-35b")
+PORT = int(os.environ.get("TFM_PORT", "8218"))
+OUT = os.environ.get("TFM_OUT", "/home/derek/tensorfold-mom/experiments/results/m3")
+REPLIES_FILE = os.environ.get("TFM_REPLIES", "/home/derek/tensorfold-mom/experiments/results/m2-tf/parent_replies.json")
+LOG = os.environ.get("TFM_LOG", "/tmp/m3-adopt-mom.log")
 SYSTEM = "You are a concise assistant."
 
 
@@ -53,10 +54,23 @@ def post(payload, timeout=600):
         return json.loads(resp.read().decode())
 
 
-def health():
+def post_or_die_str(payload, timeout=600):
+    """post() but return the error body as a string instead of raising (400 forensics)."""
     try:
-        with urllib.request.urlopen(f"http://127.0.0.1:{PORT}/health", timeout=5) as r:
-            return json.loads(r.read().decode()).get("status") == "ok"
+        return post(payload, timeout)
+    except urllib.error.HTTPError as e:
+        body = e.read().decode()[:500]
+        raise RuntimeError(f"HTTP {e.code} on model={payload.get('model')}: {body}") from None
+
+
+def health():
+    # /health alone cannot tell OUR server from a stranger squatting the port (a stale
+    # single-model toy server once made the probe POST to a server that had never heard
+    # of the parent model: health passed, every POST 400'd). Require BOTH models.
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{PORT}/v1/models", timeout=5) as r:
+            names = {m.get("id") for m in json.loads(r.read().decode()).get("data", [])}
+        return NESTED_NAME in names and BIG_NAME in names
     except Exception:
         return False
 
@@ -112,6 +126,28 @@ def replay(name: str, user_turns, replies) -> list[str]:
 def main() -> int:
     turns = int(sys.argv[1]) if len(sys.argv) > 1 else 8
     user_turns = (TRIVIAL_TURNS + WORK_TURNS)[:turns]
+    if os.environ.get("TFM_GEN_REPLIES") == "1" or not os.path.exists(REPLIES_FILE):
+        # toy/standalone pairs have no M2-TF parent_replies.json: teacher-force with the
+        # parent's OWN greedy replies (random weights are fine -- structural gates only).
+        print(f"generating parent replies -> {REPLIES_FILE}")
+        gp = boot({}, truncate=True)
+        if gp is None:
+            return 2
+        try:
+            hist = [{"role": "system", "content": SYSTEM}]
+            gen: list[str] = []
+            for c in user_turns:
+                hist.append({"role": "user", "content": c})
+                r = post_or_die_str({"model": BIG_NAME, "messages": hist, "max_tokens": 24, "temperature": 0,
+                          "stream": False, "chat_template_kwargs": {"enable_thinking": False}})
+                got = r["choices"][0]["message"]["content"]
+                gen.append(got)
+                hist.append({"role": "assistant", "content": got})
+        finally:
+            kill(gp)
+        os.makedirs(os.path.dirname(REPLIES_FILE), exist_ok=True)
+        json.dump(gen, open(REPLIES_FILE, "w"))
+        time.sleep(4)
     replies = json.load(open(REPLIES_FILE))
     if len(replies) < len(user_turns):
         print("need parent_replies.json from the M2-TF run"); return 2
@@ -187,13 +223,16 @@ def main() -> int:
             benv["TF_MOM_ADOPT_OWN_BYTES"] = "zero11"  # values ARE the poison; if 500, conv too
         if _round == 5:  # MoM M4: both engines paged; the thin cache reads the parent's KV pages in place
             benv["TF_MOM_SHARED_VIEW"] = "1"
+            benv["TF_MOM_SHARED_VERIFY"] = "1"
             benv["TF_QWEN_KV_PAGES"] = "64"
+            benv["TF_MOM_KVDUMP"] = "/tmp/kvd-r5"  # M4 dump-diff: full kept-state bytes, view mode
             # TF_QWEN_KV_PAGES alone leaves the engine's OWN stream at a contiguous
             # window -- the parent's save would then not be on pages at all.
             # PAGES_ALL moves every stream, the engine's own included, onto pool pages.
             benv["TF_QWEN_KV_PAGES_ALL"] = "1"
         if _round == 6:  # fair baseline for round 5: same paged config, NO view. The paged
             benv["TF_QWEN_KV_PAGES"] = "64"  # twin kernels may decode differently from the
+            benv["TF_MOM_KVDUMP"] = "/tmp/kvd-r6"  # M4 dump-diff: same dumps, copy mode
             benv["TF_QWEN_KV_PAGES_ALL"] = "1"  # window kernels; round 0 cannot isolate that.
         p = boot(benv)
         if p is None:
