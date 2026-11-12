@@ -173,6 +173,7 @@ pub const Pages = struct {
             h.release(h.ctx, h.ids);
             cache.shared_hold = null;
         }
+        if (cache.shared.ids_buf) |*ib| ib.free();
         cache.shared = .{};
         cuda.completion.drain(p.e.d, p.e.stream, "qwen3_5: a closed stream did not drain");
         p.pool.releaseRun(x.run, p.layout.runPages());

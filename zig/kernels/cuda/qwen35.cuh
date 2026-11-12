@@ -47,6 +47,9 @@ struct Seg {
     // ptok). 0: no view. The tail pages and all writes stay this cache's own.
     unsigned long long skv;
     unsigned long long sps;
+    unsigned long long skvi;  // the view's OWN id table (int a shared page): the thin engine's
+                              // page table is reuploaded by lease growth and resume, so the
+                              // shared ids live here, immutable for the view's life.
     int shp;
 };
 
@@ -58,7 +61,7 @@ __device__ __forceinline__ size_t kv_row(const Seg& sg, int kvh, int a, int s, i
     // shared prefix: resolve the page id through the parent arena (byte offsets are returned
     // relative to Seg.kv, the callers' base: the arenas differ, so carry the base delta).
     if (sg.shp > 0 && pos / sg.ptok < sg.shp)
-        return (size_t)((sg.skv - sg.kv) >> 1) + (size_t)pt[pos / sg.ptok] * sg.sps + (blk * sg.ptok + pos % sg.ptok) * HD;
+        return (size_t)((sg.skv - sg.kv) >> 1) + (size_t)reinterpret_cast<const int*>(sg.skvi)[pos / sg.ptok] * sg.sps + (blk * sg.ptok + pos % sg.ptok) * HD;
     return (size_t)pt[pos / sg.ptok] * sg.ps + (blk * sg.ptok + pos % sg.ptok) * HD;
 }
 

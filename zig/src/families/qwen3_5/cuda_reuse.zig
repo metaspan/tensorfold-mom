@@ -634,11 +634,13 @@ fn sharedAudit(e: *Engine, cache: *const Cache, copy: *Copy, m: *const AdoptMap,
     const ptok: usize = sv.tokens;
     const pitch = ptok * row; // the kernel's per-piece stride inside a page (blk * ptok * HD elements)
     const kv_off = m.writes[1].src;
-    const cp = cache.paged orelse return;
-    // 1) the device table must name the parent's physical pages for the shared slots
+    if (cache.paged == null) return;
+    // 1) the view's device id table must name the parent's physical pages (the thin cache's
+    // own page table is irrelevant here: the kernel resolves shared rows through skvi).
     const tb = try e.gpa.alloc(u8, pages * 4);
     defer e.gpa.free(tb);
-    try e.d.check(e.d.api.cuMemcpyDtoHAsync_v2(@ptrCast(tb.ptr), cp.table.ptr, tb.len, e.stream.handle), "cuMemcpyDtoHAsync");
+    const ib = cache.shared.ids_buf orelse return;
+    try e.d.check(e.d.api.cuMemcpyDtoHAsync_v2(@ptrCast(tb.ptr), ib.ptr, tb.len, e.stream.handle), "cuMemcpyDtoHAsync");
     _ = e.stream.synchronize() catch {};
     var table_ok = true;
     for (0..pages) |p| {
@@ -1064,12 +1066,14 @@ pub fn adoptMiss(ptr: *anyopaque, owner: ?*anyopaque, prompt: []const u32) anyer
     }
     try adoptCache(t.e, cache, b.copy, &b.map, view_pages);
     if (view) |sv| {
-        const cp = cache.paged.?;
-        // the shared slots of the device table now name the parent's physical pages (ids are
-        // physical in each engine's own arena; the kernel resolves them through skv/sps).
-        try cp.table.uploadAsync(0, std.mem.sliceAsBytes(sv.ids[0..view_pages]), t.e.stream.handle);
+        // The view carries its OWN device id table: the thin cache's page table is reuploaded
+        // from the lease's ids on growth and resume (cuda_pages.zig's Upload.write), which
+        // would clobber parent ids written into it. Immutable for the view's life.
+        var ib = try cuda.DeviceBuffer.alloc(t.e.d, view_pages * 4);
+        errdefer ib.free();
+        try ib.uploadAsync(0, std.mem.sliceAsBytes(sv.ids[0..view_pages]), t.e.stream.handle);
         try t.e.stream.synchronize();
-        cache.shared = .{ .parent_base = sv.base, .parent_elems = sv.elems, .pages = view_pages };
+        cache.shared = .{ .parent_base = sv.base, .parent_elems = sv.elems, .pages = view_pages, .ids = ib.ptr, .ids_buf = ib };
         cache.shared_hold = .{ .ctx = sv.owner, .release = &pages_mod.Pages.releaseShared, .ids = view_hold.? };
         std.log.warn("qwen3_5: adopt shared view: {d} pages resolve into the parent arena at {x}", .{ view_pages, sv.base });
         if (std.c.getenv("TF_MOM_SHARED_VERIFY") != null) {
