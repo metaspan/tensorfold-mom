@@ -601,6 +601,7 @@ fn adoptVerify(ne: *Engine, cache: *const Cache, copy: *Copy, m: *const AdoptMap
     var bad_total: usize = 0;
     var first_where: [128]u8 = undefined;
     var first_len: usize = 0;
+    var region_bad = std.mem.zeroes([64]usize); // per-region nonfinite counts (state block)
     const base_src: [*]const u8 = @ptrCast(copy.host.bytes.ptr);
     {
         const recb = ne.g.recBytes();
@@ -613,6 +614,7 @@ fn adoptVerify(ne: *Engine, cache: *const Cache, copy: *Copy, m: *const AdoptMap
             for (rec, 0..) |v, el| {
                 if (!std.math.isFinite(v)) {
                     bad_total += 1;
+                    region_bad[d] += 1;
                     if (first_len == 0) first_len = (std.fmt.bufPrint(&first_where, "region {d} rec f32 element {d} head {d}", .{ d, el, el / (recb / 4 / ne.g.v_heads) }) catch return).len;
                 }
             }
@@ -620,9 +622,17 @@ fn adoptVerify(ne: *Engine, cache: *const Cache, copy: *Copy, m: *const AdoptMap
             for (conv, 0..) |v, ci| {
                 if ((v & 0x7F80) == 0x7F80 and (v & 0x007F) != 0) {
                     bad_total += 1;
+                    region_bad[d] += 1;
                     if (first_len == 0) first_len = (std.fmt.bufPrint(&first_where, "region {d} conv bf16 element {d}", .{ d, ci }) catch return).len;
                 }
             }
+        }
+    }
+    { // name every state region holding non-finites: correlating with the audit's differing
+      // region (11) pins the poison to the parent's own GDN layer, not the copy mechanism.
+        var d: usize = 0;
+        while (d < ne.g.deltas() and d < region_bad.len) : (d += 1) {
+            if (region_bad[d] != 0) std.log.warn("qwen3_5: adopt verify scan: region {d}: {d} nonfinite", .{ d, region_bad[d] });
         }
     }
     for (1..m.writes.len) |pi| {
@@ -792,6 +802,26 @@ pub fn adoptMiss(ptr: *anyopaque, owner: ?*anyopaque, prompt: []const u32) anyer
 /// Compare an adopted parent copy against the nested engine's own save of the same prompt, piece by
 /// piece. KV rows are immutable, so an adopted kv piece must be bit-identical to what the engine
 /// itself writes; the state block was mutated by the resumed forward and is skipped.
+fn regionScan(g: Geometry, blob: []const u8, off: usize) usize { // nonfinite count in the state block
+    const recb = g.recBytes();
+    const convb = g.convBytes();
+    const region = recb + convb;
+    const base: [*]const u8 = @ptrCast(blob.ptr + off);
+    var n: usize = 0;
+    var d: usize = 0;
+    while (d < g.deltas()) : (d += 1) {
+        const rec = @as([*]const f32, @alignCast(@ptrCast(base + d * region)))[0 .. recb / 4];
+        for (rec) |v| {
+            if (!std.math.isFinite(v)) n += 1;
+        }
+        const conv = @as([*]const u16, @alignCast(@ptrCast(base + d * region + recb)))[0 .. convb / 2];
+        for (conv) |v| {
+            if ((v & 0x7F80) == 0x7F80 and (v & 0x007F) != 0) n += 1;
+        }
+    }
+    return n;
+}
+
 fn diffAudit(a: AdoptAudit, copy: *Copy, compare_state: bool) void {
     if (copy.dev != null or a.parent_copy.dev != null) {
         std.log.warn("qwen3_5: adopt audit skipped: a copy is device-backed (set TF_MOM_ADOPT_HOST)", .{});
