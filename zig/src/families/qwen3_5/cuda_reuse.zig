@@ -221,8 +221,10 @@ pub fn save(ptr: *anyopaque, owner: ?*anyopaque, at: u32) anyerror!*anyopaque {
     const cache = t.caches.get(s) orelse return error.UnknownStream;
     // MoM M3 diagnostic: TF_MOM_ADOPT_HOST keeps the records host-readable for the byte audit.
     const keep_host = adoptEnabled() and std.c.getenv("TF_MOM_ADOPT_HOST") != null;
-    if (keep_host and std.c.getenv("TF_MOM_AUDIT_COLD") != null)
-        std.log.info("qwen3_5: adopt audit save at {d} cuts {any}", .{ at, s.chunks });
+    if (keep_host and std.c.getenv("TF_MOM_AUDIT_COLD") != null) {
+        std.log.info("qwen3_5: adopt audit save at {d}, {d} cuts", .{ at, s.chunks.len });
+        for (s.chunks, 0..) |c, i| std.log.info("qwen3_5: adopt audit cut {d} = {d}", .{ i, c });
+    }
     const copy = try saveCache(t.e, cache, at, t.seen.get(s) orelse &.{}, t.device and t.ctx == null and !keep_host);
     // the audit fires either after an adoption (kv pieces only: the state block was resumed and mutated)
     // or, when TF_MOM_AUDIT_COLD is set, on this engine's own cold save (no resume: the state block is
@@ -672,7 +674,7 @@ fn diffAudit(a: AdoptAudit, copy: *Copy, compare_state: bool) void {
             if (i == 0) { // the state block: name the regions and the head (region = recurrence + conv tail)
                 const gp = a.pg;
                 const region = gp.recBytes() + gp.convBytes();
-                const per_head = gp.v_heads * gp.dk * gp.dk * 4 / gp.v_heads;
+                const per_head = geometry.dk * geometry.dk * 4; // one v-head's recurrence, fp32
                 const reg = k / region;
                 std.log.warn("qwen3_5: adopt audit state: region {d} of {d} (rec {d} + conv {d}), byte {d} in region (head ~{d} of {d})", .{
                     reg, a.map.writes[0].len / region, gp.recBytes(), gp.convBytes(), k % region, (k % region) / per_head, gp.v_heads,
