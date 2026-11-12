@@ -51,6 +51,7 @@ struct Seg {
                               // page table is reuploaded by lease growth and resume, so the
                               // shared ids live here, immutable for the view's life.
     int shp;
+    int dbg; // probe build: non-zero = printf once per block at each shared read site
 };
 
 // Seg.kv's element of layer a's key (s 0) or value (s 1) at pos, head h: cap rows a head, or pos's page's row.
@@ -60,8 +61,11 @@ __device__ __forceinline__ size_t kv_row(const Seg& sg, int kvh, int a, int s, i
     const int* pt = reinterpret_cast<const int*>(sg.pt);
     // shared prefix: resolve the page id through the parent arena (byte offsets are returned
     // relative to Seg.kv, the callers' base: the arenas differ, so carry the base delta).
-    if (sg.shp > 0 && pos / sg.ptok < sg.shp)
+    if (sg.shp > 0 && pos / sg.ptok < sg.shp) {
+        if (sg.dbg && threadIdx.x == 0 && blockIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0)
+            printf("kprobe kv_row pos=%d pid=%d\n", pos, (int)reinterpret_cast<const int*>(sg.skvi)[pos / sg.ptok]);
         return (size_t)((sg.skv - sg.kv) >> 1) + (size_t)reinterpret_cast<const int*>(sg.skvi)[pos / sg.ptok] * sg.sps + (blk * sg.ptok + pos % sg.ptok) * HD;
+    }
     return (size_t)pt[pos / sg.ptok] * sg.ps + (blk * sg.ptok + pos % sg.ptok) * HD;
 }
 

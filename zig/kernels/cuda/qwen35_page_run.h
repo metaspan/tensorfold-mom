@@ -17,11 +17,12 @@ typedef struct {
 } TfQ35PageRun;
 
 TF_Q35_PAGE_INLINE uint64_t tf_q35_page_base(TfQ35PageRun* run, int pos) {
+    // Stateless: the MoM shared view calls two runs interleaved for the same walk
+    // (shared pages via the view's skvi, tail pages via the thin's pt), and a walk
+    // is not monotone when the slot scan replays pending kept rows first -- a
+    // cached base then serves earlier logical pages the last page's id (2026-11-12
+    // toy repro: deterministic garbage past page 0 with the audit green).
     const int logical = pos / run->tokens;
-    if (logical != run->logical) {
-        run->base = (uint64_t)run->ids[logical] * run->stride;
-        run->logical = logical;
-    }
-    return run->base;
+    return (uint64_t)run->ids[logical] * run->stride;
 }
 #undef TF_Q35_PAGE_INLINE

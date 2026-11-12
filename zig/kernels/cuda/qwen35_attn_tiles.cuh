@@ -101,6 +101,7 @@ struct Bf16Tiles {
     size_t lblk, hoff, vgap;  // a page's layer block (elements), the head's first row in it, keys to values
     int ptok;
     bool paged;
+    int dbg = 0; // probe build: printf once per block at shared reads
     // the page a thread read last, kept across tiles: its first row is looked up once a page, not once a tile
     const __nv_bfloat16* near = nullptr;
     int lo = 0;
@@ -115,6 +116,7 @@ struct Bf16Tiles {
         sharena = reinterpret_cast<const __nv_bfloat16*>(sg.skv);
         shpage = TfQ35PageRun{reinterpret_cast<const int*>(sg.skvi), sg.ptok, -1, sg.sps, 0};
         shp_ = sg.shp;
+        dbg = sg.dbg;
         lblk = (size_t)layer * 2 * kvh * sg.ptok * HD;
         hoff = (size_t)h * sg.ptok;
         vgap = (size_t)kvh * sg.ptok * HD;
@@ -124,7 +126,11 @@ struct Bf16Tiles {
     // cache position pos's row of keys and of values (pos >= 0)
     __device__ const __nv_bfloat16* kp(int pos) {
         if (!paged) return K + (size_t)pos * HD;
-        if (shp_ > 0 && pos / ptok < shp_) return sharena + tf_q35_page_base(&shpage, pos) + lblk + (hoff + pos % ptok) * HD;
+        if (shp_ > 0 && pos / ptok < shp_) {
+            if (dbg && threadIdx.x == 0 && blockIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0)
+                printf("kprobe bf16kp pos=%d pid=%d\n", pos, shpage.ids[pos / ptok]);
+            return sharena + tf_q35_page_base(&shpage, pos) + lblk + (hoff + pos % ptok) * HD;
+        }
         return arena + tf_q35_page_base(&page, pos) + lblk + (hoff + pos % ptok) * HD;
     }
     __device__ const __nv_bfloat16* vp(int pos) { return paged ? kp(pos) + vgap : V + (size_t)pos * HD; }
@@ -141,7 +147,12 @@ struct Bf16Tiles {
                 if (near == nullptr || pos < lo || pos - lo >= ptok) {
                     const bool sh = shp_ > 0 && pos / ptok < shp_;
                     lo = pos / ptok * ptok;
-                    near = (sh ? sharena : arena) + (size_t)page.ids[lo / ptok] * (sh ? shpage.stride : page.stride) + lblk + hoff * HD;
+                    // the id must come from the SAME table the base/stride belong to: shared
+                    // pages live in the parent arena and are indexed by the view's own ids.
+                    const int pid = (sh ? shpage : page).ids[lo / ptok];
+                    if (dbg && sh && threadIdx.x == 0 && blockIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0)
+                        printf("kprobe bf16near pos=%d pid=%d\n", pos, pid);
+                    near = (sh ? sharena : arena) + (size_t)pid * (sh ? shpage.stride : page.stride) + lblk + hoff * HD;
                 }
                 k = near + (size_t)(pos - lo) * HD;
                 v = k + vgap;

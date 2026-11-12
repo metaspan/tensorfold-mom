@@ -581,6 +581,7 @@ pub fn adoptCache(ne: *Engine, cache: *Cache, copy: *Copy, m: *const AdoptMap, s
         // MoM M4: a shared view already resolves the first `shared_pages` pages into the
         // parent arena — their bytes are the parent's own, so this copy starts above them.
         var p: usize = shared_pages;
+        if (std.c.getenv("TF_MOM_VIEW_COPY_FULL") != null) p = 0; // bisect diagnostic: fill the thin's OWN pages too
         while (p * pg.tokens < l.at) : (p += 1) {
             const rows = @min(pg.tokens, l.at - p * pg.tokens);
             const dev = pg.base + pg.ids[p] * page_bytes;

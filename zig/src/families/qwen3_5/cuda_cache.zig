@@ -37,7 +37,7 @@ pub fn pendBytes(g: anytype) usize {
 }
 
 /// qwen35.cuh's Seg and Path.
-pub const Seg = extern struct { rec: u64, conv: u64, kv: u64, tap: u64, log: u64, before: u64, cap: c_int, len: c_int, row0: c_int, rows: c_int, tap_rows: c_int, taps: c_int, delta: c_int, pt: u64 = 0, ps: u64 = 0, ptok: c_int = 0, pn: c_int = 0, plog: u64 = 0, skv: u64 = 0, sps: u64 = 0, skvi: u64 = 0, shp: c_int = 0 };
+pub const Seg = extern struct { rec: u64, conv: u64, kv: u64, tap: u64, log: u64, before: u64, cap: c_int, len: c_int, row0: c_int, rows: c_int, tap_rows: c_int, taps: c_int, delta: c_int, pt: u64 = 0, ps: u64 = 0, ptok: c_int = 0, pn: c_int = 0, plog: u64 = 0, skv: u64 = 0, sps: u64 = 0, skvi: u64 = 0, shp: c_int = 0, dbg: c_int = 0 };
 pub const Path = extern struct { n: c_int, rows: [engine.most_window]c_int };
 
 /// A cache's keys and values as pages (qwen35.cuh kv_row): page i of the stream's positions at `base` + ids[i] pages.
@@ -340,6 +340,9 @@ pub const Cache = struct {
                 sg.shp = @intCast(self.shared.pages);
             }
         }
+        sg.dbg = if (std.c.getenv("TF_MOM_KPROBE") != null) 1 else 0;
+        if (std.c.getenv("TF_MOM_SEGLOG") != null)
+            std.log.warn("seglog: len={d} row0={d} rows={d} shp={d} skvi={x} pt={x} skv={x} paged={d}", .{ len, row0, rows, sg.shp, sg.skvi, sg.pt, sg.skv, @intFromBool(self.paged != null) });
         return sg;
     }
 
