@@ -484,7 +484,7 @@ pub const AdoptMap = struct {
         for (1..nl.count()) |i| {
             const np = nl.piece(i);
             w.appendAssumeCapacity(.{ .src = off, .len = np.len, .piece = i });
-            // MoM BL-26: stride the copy in PARENT piece sizes. The loop index is a nested
+            // MoM BL-29: stride the copy in PARENT piece sizes. The loop index is a nested
             // piece index; when the nested engine drops a piece the parent keeps (a linear
             // layer over the nested's `layers` cap), nested piece i no longer sits at parent
             // piece i in the copy -- the packed offset must follow the parent's packing.
@@ -536,7 +536,7 @@ pub fn adoptCache(ne: *Engine, cache: *Cache, copy: *Copy, m: *const AdoptMap, s
     // stale recurrence; a tail tap past the window). The nested resume DOES read them and the
     // logits go NaN. Zeroing non-finite state values restores the bytes a fresh nested buffer
     // holds -- the values the thin engine would have produced itself.
-    // MoM BL-26: this ran only for env-gated HOST copies. Production default is device-backed
+    // MoM BL-29: this ran only for env-gated HOST copies. Production default is device-backed
     // (GB10 integrated), so it never once ran there: the first cold device adoption decoded
     // NonfiniteQwenLogits (verified: dozens of non-finite rec f32 per delta region, KV clean).
     // Now unconditional on both paths. For a device copy the state block is staged to the host,
@@ -576,7 +576,7 @@ pub fn adoptCache(ne: *Engine, cache: *Cache, copy: *Copy, m: *const AdoptMap, s
             }
         }
         if (staged) |buf| { // write the sanitized state back so the device copy matches the host one
-            const zero_state = std.c.getenv("TF_MOM_ADOPT_ZERO_STATE") != null; // BL-26 bisection: nuke the whole state block
+            const zero_state = std.c.getenv("TF_MOM_ADOPT_ZERO_STATE") != null; // BL-29 bisection: nuke the whole state block
             if (zero_state) @memset(buf, 0);
             if (zr != 0 or zc != 0 or zero_state) {
                 const b = copy.dev.?;
@@ -585,7 +585,7 @@ pub fn adoptCache(ne: *Engine, cache: *Cache, copy: *Copy, m: *const AdoptMap, s
         } else if (std.c.getenv("TF_MOM_ADOPT_ZERO_STATE") != null) {
             @memset(base[0..state_bytes], 0);
         }
-        if (std.c.getenv("TF_MOM_ADOPT_DUMP") != null) { // BL-26: byte-compare the state block device vs host copy
+        if (std.c.getenv("TF_MOM_ADOPT_DUMP") != null) { // BL-29: byte-compare the state block device vs host copy
             const path = "/tmp/tf_mom_statedump.bin";
             const fd = std.c.open(path, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, @as(std.c.mode_t, 0o644));
             if (fd != -1) {
@@ -735,9 +735,9 @@ fn adoptVerify(ne: *Engine, cache: *const Cache, copy: *Copy, m: *const AdoptMap
     defer copy.reading = false;
     const l: Layout = .{ .g = ne.g, .format = copy.format, .cap = cache.cap, .at = m.at };
     const a = ne.gpa;
-    // MoM BL-26: a device-backed copy is verified too -- both sides are read back to the
+    // MoM BL-29: a device-backed copy is verified too -- both sides are read back to the
     // host and compared. The old skip ("set TF_MOM_ADOPT_HOST") left the production
-    // default path (GB10 integrated saves) with zero byte visibility, and BL-26 lived there.
+    // default path (GB10 integrated saves) with zero byte visibility, and BL-29 lived there.
     var copy_host: ?[]u8 = null;
     defer if (copy_host) |b| a.free(b);
     const src_base: ?[*]const u8 = if (copy.dev) |b| blk: {
@@ -790,7 +790,7 @@ fn adoptVerify(ne: *Engine, cache: *const Cache, copy: *Copy, m: *const AdoptMap
     var first_where: [128]u8 = undefined;
     var first_len: usize = 0;
     var region_bad = std.mem.zeroes([64]usize); // per-region nonfinite counts (state block)
-    const base_src: [*]const u8 = if (copy_host) |b| b.ptr else copy.host.bytes.ptr; // device copies: the staged DtoH buffer (BL-26: the old read of an empty host buffer segfaulted)
+    const base_src: [*]const u8 = if (copy_host) |b| b.ptr else copy.host.bytes.ptr; // device copies: the staged DtoH buffer (BL-29: the old read of an empty host buffer segfaulted)
     {
         const recb = ne.g.recBytes();
         const convb = ne.g.convBytes();
