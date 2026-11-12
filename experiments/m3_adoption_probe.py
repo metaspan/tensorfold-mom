@@ -170,7 +170,7 @@ def main() -> int:
     # determinism from the cold-prefill ULP noise the control proved.
     adopt_list: list[str] = []
     ctl_present = bool(_glob.glob("/tmp/tf_mom_ctl_*.bin"))
-    for _round in range(2 + (2 if ctl_present else 0)):
+    for _round in range(2 + (3 if ctl_present else 0)):
         benv = {"TF_MOM_ADOPT": "1", "TF_MOM_ADOPT_HOST": "1", "TF_MOM_ADOPT_VERIFY": "1",
                 "TF_MOM_ADOPT_SANITIZE": "1"}
         if ctl_present:
@@ -179,6 +179,8 @@ def main() -> int:
             benv["TF_MOM_ADOPT_OWN_BYTES"] = "all"
         if _round == 3:  # localize: replace ONLY region 11 (last linear region of the thin engine)
             benv["TF_MOM_ADOPT_OWN_BYTES"] = "region11"
+        if _round == 4:  # localize further: zero region 11 -- if finite, the parent's ~1e-3 rec
+            benv["TF_MOM_ADOPT_OWN_BYTES"] = "zero11"  # values ARE the poison; if 500, conv too
         p = boot(benv)
         if p is None:
             break

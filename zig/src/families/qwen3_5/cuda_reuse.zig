@@ -879,6 +879,16 @@ pub fn adoptMiss(ptr: *anyopaque, owner: ?*anyopaque, prompt: []const u32) anyer
             const region = t.e.g.recBytes() + t.e.g.convBytes();
             var off: usize = 0;
             var st = @min(t.e.g.stateBytes(), b.copy.host.bytes.len);
+            if (std.mem.startsWith(u8, mode, "zero")) { // diagnostic: zero one region (or all)
+                if (!std.mem.eql(u8, mode, "zeroall")) {
+                    const r = std.fmt.parseInt(usize, mode[4..], 10) catch break :ownbytes;
+                    off = r * region;
+                    st = @min(region, b.copy.host.bytes.len - off);
+                }
+                @memset(b.copy.host.bytes[off..][0..st], 0);
+                std.log.warn("qwen3_5: adopt zero-region: {s} bytes at {d}", .{ mode, off });
+                break :ownbytes;
+            }
             if (std.mem.startsWith(u8, mode, "region")) {
                 const r = std.fmt.parseInt(usize, mode[6..], 10) catch 0;
                 off = r * region;
