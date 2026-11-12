@@ -1,0 +1,14 @@
+[
+ {"q": "What is 23 plus 19? Answer with just the number.", "a": ["42"]},
+ {"q": "Capital of Japan? One word.", "a": ["tokyo"]},
+ {"q": "Convert 10 kilometres to miles, one decimal place.", "a": ["6.2"]},
+ {"q": "Is 15 a prime number? Yes or no.", "a": ["no"]},
+ {"q": "How many legs does a spider have? Just the number.", "a": ["8"]},
+ {"q": "Translate 'good night' to Spanish.", "a": ["buenas noches", "buenas noches."]},
+ {"q": "What is 6 times 7? Just the number.", "a": ["42"]},
+ {"q": "Which is larger: 0.6 or 5/8? One answer.", "a": ["5/8"]},
+ {"q": "Fix the grammar: 'she go to school yesterday'.", "a": ["she went to school yesterday"]},
+ {"q": "What does GPU stand for? One line.", "a": ["graphics processing unit"]},
+ {"q": "How many minutes are in one and a half hours? Just the number.", "a": ["90"]},
+ {"q": "Reverse the word 'world'.", "a": ["dlrow"]}
+]

@@ -32,12 +32,18 @@ STUDENT = "/home/derek/models/tensorfold-mom/qwen36-nested-16l-bf16"  # material
 FROZEN_LAYERS = 10  # layers 0..9 frozen (matches nested_extract default)
 
 
-def load_rows(path: str) -> list[dict]:
+def load_rows(path: str, rng=None) -> list[dict]:
     rows = []
     for line in open(path):
         r = json.loads(line)
         if not r.get("completion"):
             continue
+        comp = r["completion"]
+        # thinking rows carry the teacher's reasoning separately; the Qwen3
+        # convention trains it INSIDE the assistant turn (spec data mix:
+        # thinking blocks in history make lane-hops familiar to the student).
+        if r.get("thinking_text"):
+            comp = "<think>\n" + r["thinking_text"].strip() + "\n</think>\n\n" + comp
         msgs = []
         if r.get("history_completion"):
             msgs = [{"role": "user", "content": r["prompt"]},
@@ -47,7 +53,7 @@ def load_rows(path: str) -> list[dict]:
             msgs.append({"role": "user", "content": "Reply with just OK plus the final answer again."})
         else:
             msgs = [{"role": "user", "content": r["prompt"]}]
-        rows.append((msgs, r["completion"]))
+        rows.append((msgs, comp))
     return rows
 
 
@@ -58,6 +64,8 @@ def main() -> int:
     ap.add_argument("--epochs", type=int, default=2)
     ap.add_argument("--lr", type=float, default=1e-5)
     ap.add_argument("--max-len", type=int, default=512)
+    ap.add_argument("--eval-fraction", type=float, default=0.1)
+    ap.add_argument("--seed", type=int, default=7)
     args = ap.parse_args()
     dev = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -86,6 +94,15 @@ def main() -> int:
 
     rows = load_rows(args.data)
     print(f"rows: {len(rows)}")
+    # Held-out eval split (pre-registration hygiene): the coherence GATE runs on a
+    # DISJOINT QA set (distill_gate.py); this split only watches overfitting.
+    import random as _random
+    order = list(range(len(rows)))
+    _random.Random(args.seed).shuffle(order)
+    n_eval = int(len(rows) * args.eval_fraction)
+    eval_rows = [rows[i] for i in order[:n_eval]]
+    train_rows = [rows[i] for i in order[n_eval:]]
+    print(f"train rows: {len(train_rows)}, eval rows: {n_eval}")
     opt = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad], lr=args.lr)
 
     eos_ids = {tok.eos_token_id}
@@ -94,19 +111,21 @@ def main() -> int:
         if isinstance(t, int) and t >= 0:
             eos_ids.add(t)
 
+    def ce_on(msgs, comp):
+        prompt = tok.apply_chat_template(msgs, add_generation_prompt=True, tokenize=False)
+        full = prompt + comp + tok.eos_token
+        enc = tok(full, return_tensors="pt", truncation=True, max_length=args.max_len)
+        input_ids = enc["input_ids"].to(dev)
+        labels = input_ids.clone()
+        p_len = min(tok(prompt, add_special_tokens=False)["input_ids"].__len__(),
+                    labels.shape[1])
+        labels[:, :p_len] = -100
+        return model(input_ids=input_ids, labels=labels).loss
+
     for ep in range(args.epochs):
         tot_loss, n = 0.0, 0
-        for msgs, comp in rows:
-            prompt = tok.apply_chat_template(msgs, add_generation_prompt=True, tokenize=False)
-            full = prompt + comp + tok.eos_token
-            enc = tok(full, return_tensors="pt", truncation=True, max_length=args.max_len)
-            input_ids = enc["input_ids"].to(dev)
-            labels = input_ids.clone()
-            p_len = min(tok(prompt, add_special_tokens=False)["input_ids"].__len__(),
-                        labels.shape[1])
-            labels[:, :p_len] = -100
-            out = model(input_ids=input_ids, labels=labels)
-            loss = out.loss
+        for msgs, comp in train_rows:
+            loss = ce_on(msgs, comp)
             if not torch.isfinite(loss):
                 print("non-finite loss; skipping row"); continue
             opt.zero_grad()
@@ -115,7 +134,13 @@ def main() -> int:
                 [p for p in model.parameters() if p.requires_grad], 1.0)
             opt.step()
             tot_loss += loss.item(); n += 1
-        print(f"epoch {ep+1}: mean loss {tot_loss/max(n,1):.4f} over {n} rows")
+        line = f"epoch {ep+1}: train loss {tot_loss/max(n,1):.4f} over {n} rows"
+        if eval_rows:
+            with torch.no_grad():
+                ev = [ce_on(m, c).item() for m, c in eval_rows]
+            ev = [v for v in ev if v == v]  # drop nan evals
+            line += f"; eval loss {sum(ev)/max(len(ev),1):.4f} over {len(ev)} rows"
+        print(line)
 
     os.makedirs(args.out_dir, exist_ok=True)
     # Stream-save tensor-by-tensor: save_pretrained's single 27 GiB shard materialized
