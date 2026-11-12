@@ -26,8 +26,11 @@ RECB = 32 * 128 * 128 * 4
 R11 = 11 * REGION
 
 def engrec(path):
+    return engrec_at(path, 11)
+
+def engrec_at(path, reg):
     with open(path, "rb") as f:
-        f.seek(R11)
+        f.seek(reg * REGION)
         b = f.read(RECB)
     return np.frombuffer(b, dtype=np.float32).reshape(32, 128, 128)
 
@@ -81,36 +84,57 @@ def main():
     print("hooking", tgt[0], type(tgt[1]).__name__)
     h = tgt[1].register_forward_hook(hook)
     model.eval()
-    with torch.no_grad():
-        out = model(ids, use_cache=True)
+    rec_captured = {}
+    def run_fwd():
+        from transformers.cache_utils import DynamicCache
+        dc_init = DynamicCache.__init__
+        orig_urs = DynamicCache.update_recurrent_state
+        def patched_init(self, *a, **k):
+            dc_init(self, *a, **k)
+            def urs(*args, **kw):
+                for x in list(args) + list(kw.values()):
+                    if torch.is_tensor(x) and x.dim() == 4:
+                        rec_captured.setdefault("states", []).append(x)
+                return orig_urs(self, *args, **kw)
+            self.update_recurrent_state = urs
+        DynamicCache.__init__ = patched_init
+        try:
+            with torch.no_grad():
+                return model(ids, use_cache=True)
+        finally:
+            DynamicCache.__init__ = dc_init
+    out = run_fwd()
     h.remove()
-    o = captured.get("out")
-    cands = []
-    if isinstance(o, torch.Tensor):
-        cands = [o]
-    elif isinstance(o, (tuple, list)):
-        cands = [x for x in o if torch.is_tensor(x)]
-    states = [x for x in cands if x.dim() == 4 and 128 in x.shape[-2:]]
-    print("captured tensors:", [(tuple(x.shape), str(x.dtype)) for x in cands])
-    assert states, f"no [B,H,128,128] recurrent state captured; got {[tuple(x.shape) for x in cands]}"
-    s = states[0][0].float().cpu().numpy()
+    recs = rec_captured.get("states", [])
+    print("recurrent updates:", [(tuple(x.shape), str(x.dtype)) for x in recs][:14])
+    assert len(recs) == 12, f"expected 12 linear-layer state updates, got {len(recs)}"
+    s = recs[-1][0].float().cpu().numpy()  # last linear layer = model layer 14
     print("hf state shape:", s.shape)
+    np.save("/tmp/hf_l14_state.npy", s)
 
-    P = engrec("/tmp/tf_mom_ctl_186_179_L40.bin")
-    N = engrec("/tmp/tf_mom_ctl_186_179_L16.bin")
-    def agree(a, b):
-        if a.shape != b.shape:
-            return -1.0
-        num = np.abs(a - b).max()
-        den = max(np.abs(a).max(), np.abs(b).max(), 1e-9)
-        return float(num / den)
-    for name, E in (("parent", P), ("nested", N)):
-        for orient, H in (("direct", s), ("T", np.swapaxes(s, -1, -2))):
-            # per-head worst relative error
-            errs = [agree(H[h], E[h]) for h in range(32)]
-            grp_low = max(errs[:23]); grp_hi = max(errs[23:])
-            print(f"{name} {orient}: max-rel heads 0-22 {grp_low:.4f}, heads 23-31 {grp_hi:.4f}, "
-                  f"all-heads {max(errs):.4f}")
+    # region sweep: compare EVERY captured linear state to its engine region.
+    # Regions 0-10 are engine-agreeing ground truth: a sound reference pipeline must
+    # correlate ~1 there; only then is the layer-14 comparison trustworthy.
+    def corr(a, b):
+        a = a.reshape(-1); b = b.reshape(-1)
+        sa, sb = a.std(), b.std()
+        if sa < 1e-12 or sb < 1e-12:
+            return 1.0 if np.abs(a - b).max() < 1e-6 else 0.0
+        return float(np.corrcoef(a, b)[0, 1])
+    for name, path in (("parent", "/tmp/tf_mom_ctl_186_179_L40.bin"),
+                       ("nested", "/tmp/tf_mom_ctl_186_179_L16.bin")):
+        with open(path, "rb") as f:
+            pass
+        for orient in ("direct", "T"):
+            line = []
+            for reg in range(12):
+                E = engrec_at(path, reg)
+                H = recs[reg][0].float().cpu().numpy()
+                if orient == "T":
+                    H = np.swapaxes(H, -1, -2)
+                cs = [corr(H[h], E[h]) for h in range(32)]
+                line.append(f"r{reg}:{np.median(cs):+.2f}")
+            print(f"{name} {orient}: " + " ".join(line))
 
 if __name__ == "__main__":
     main()
