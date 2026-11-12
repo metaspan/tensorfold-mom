@@ -172,7 +172,7 @@ def main() -> int:
     adopt_by_round: dict[int, str] = {}
     ctl_present = bool(_glob.glob("/tmp/tf_mom_ctl_*.bin"))
     skip_diag = os.environ.get("M3_SKIP_DIAGNOSTIC_ROUNDS") == "1"
-    for _round in range(2 + (4 if ctl_present else 0)):
+    for _round in range(2 + (5 if ctl_present else 0)):
         if skip_diag and _round in (2, 3, 4):  # own_bytes diagnostics: already closed out
             continue
         benv = {"TF_MOM_ADOPT": "1", "TF_MOM_ADOPT_HOST": "1", "TF_MOM_ADOPT_VERIFY": "1",
@@ -192,6 +192,9 @@ def main() -> int:
             # window -- the parent's save would then not be on pages at all.
             # PAGES_ALL moves every stream, the engine's own included, onto pool pages.
             benv["TF_QWEN_KV_PAGES_ALL"] = "1"
+        if _round == 6:  # fair baseline for round 5: same paged config, NO view. The paged
+            benv["TF_QWEN_KV_PAGES"] = "64"  # twin kernels may decode differently from the
+            benv["TF_QWEN_KV_PAGES_ALL"] = "1"  # window kernels; round 0 cannot isolate that.
         p = boot(benv)
         if p is None:
             break
@@ -254,17 +257,22 @@ def main() -> int:
         print(f"G3 decode-resume gate: FAIL (same adopted bytes, differing replies: {adopt_list!r})")
         return 1
     # MoM M4: the shared-view round must have actually resolved pages in the parent's
-    # arena (logged) and answered byte-identically to the copy path it replaces.
+    # arena (logged, both sides) and answered byte-identically to the SAME-paged-config
+    # copy path (round 6). Comparing against round 0 (window kernels) would confound
+    # the paged twin kernels' decode with the view's correctness.
     sv = adopt_by_round.get(5)
     if sv is not None:
         sv_lines = [l for l in lines if "adopt shared view" in l]
-        if not sv_lines:
-            print("M4 shared-view gate: FAIL -- paged round logged no shared-view line (silently fell back to the copy path)")
+        sink_lines = [l for l in lines if "adopt sink" in l and "shared view" in l]
+        if not sv_lines or not sink_lines:
+            print(f"M4 shared-view gate: FAIL -- paged round logged consumer={len(sv_lines)} "
+                  f"producer={len(sink_lines)} shared-view lines (silent copy-path fallback?)")
             return 1
-        if sv.startswith("<error") or sv != adopt_list[0]:
-            print(f"M4 shared-view gate: FAIL (zero-copy reply differs: {sv[:60]!r} vs copy path {adopt_list[0][:60]!r})")
+        fair = adopt_by_round.get(6, adopt_list[0])
+        if sv.startswith("<error") or sv != fair:
+            print(f"M4 shared-view gate: FAIL (zero-copy reply differs: {sv[:60]!r} vs paged copy {fair[:60]!r})")
             return 1
-        print(f"M4 shared-view gate: PASS ({len(sv_lines)} resolve lines; zero-copy reply byte-identical to the copy path)")
+        print(f"M4 shared-view gate: PASS ({len(sv_lines)} resolve lines; zero-copy reply byte-identical to the paged copy path)")
     print(f"G3 decode-resume gate: PASS (adoption fired x{len(adopted_lines)}, decode finite, "
           f"adopted replies byte-identical across boots); reply==baseline: "
           f"{'yes' if adopted_ok else 'no (expected pre-G2)'}")
