@@ -581,9 +581,17 @@ fn adoptVerify(ne: *Engine, cache: *const Cache, copy: *Copy, m: *const AdoptMap
         const src: [*]const u8 = if (copy.dev) |b| @ptrFromInt(b.ptr + m.writes[i].src) else @ptrCast(copy.host.bytes.ptr + m.writes[i].src);
         var k: usize = 0;
         while (k < p.len and buf[k] == src[k]) : (k += 1) {}
-        if (k == p.len) ok_pieces += 1 else std.log.warn(
-            "qwen3_5: adopt verify piece {d} MISMATCH at byte {d} of {d}", .{ i, k, p.len },
-        );
+        if (k == p.len) ok_pieces += 1 else {
+            const take = @min(@as(usize, 16), p.len - k);
+            var dh = [_]u8{0} ** 16;
+            var sh = [_]u8{0} ** 16;
+            @memcpy(dh[0..take], buf[k..][0..take]);
+            @memcpy(sh[0..take], src[k..][0..take]);
+            std.log.warn(
+                "qwen3_5: adopt verify piece {d} MISMATCH at byte {d} of {d}; dev={x} src={x}",
+                .{ i, k, p.len, dh, sh },
+            );
+        }
     }
     std.log.warn("qwen3_5: adopt verify: {d} of {d} device pieces match the copy", .{ ok_pieces, n_pieces });
 }
