@@ -1,5 +1,10 @@
 # TensorFold
 
+> **MoM fork.** This tree carries the Mixture-of-Models work: multi-model single-process
+> serving and the nested shared-KV program. Our design docs, daily diary and experiment
+> record live in [`docs-mom/README.md`](docs-mom/README.md). Upstream:
+> [ashhart/TensorFold](https://github.com/ashhart/TensorFold).
+
 TensorFold serves language models from a Zig binary on Apple Silicon and NVIDIA GPUs.
 The engine reads checkpoints, tokenizes requests and runs Metal or CUDA kernels directly.
 Serving needs no Python or MLX installation.
