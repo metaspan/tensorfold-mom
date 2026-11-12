@@ -226,7 +226,7 @@ pub fn save(ptr: *anyopaque, owner: ?*anyopaque, at: u32) anyerror!*anyopaque {
         for (s.chunks, 0..) |c, i| std.log.info("qwen3_5: adopt audit cut {d} = {d}", .{ i, c });
     }
     const copy = try saveCache(t.e, cache, at, t.seen.get(s) orelse &.{}, t.device and t.ctx == null and !keep_host);
-    if (keep_host and std.c.getenv("TF_MOM_AUDIT_COLD") != null) controlCheck(t.e, copy, s.prompt(), t.e.g);
+    if (keep_host and std.c.getenv("TF_MOM_AUDIT_COLD") != null) controlCheck(t.e, t.io, copy, s.prompt(), t.e.g);
     // the audit fires either after an adoption (kv pieces only: the state block was resumed and mutated)
     // or, when TF_MOM_AUDIT_COLD is set, on this engine's own cold save (no resume: the state block is
     // byte-fresh, so a match proves the map copies exactly what the engine itself writes).
@@ -585,17 +585,18 @@ fn controlResult(ok: bool, first_diff: usize, len: usize) void {
 
 /// Store/compare the state block of a cold save against the same (prompt length, at) from a
 /// previous boot -- the same-engine determinism control for the cross-engine audit.
-fn controlCheck(e: *Engine, copy: *Copy, prompt: []const u32, g: Geometry) void {
+fn controlCheck(e: *Engine, io: std.Io, copy: *Copy, prompt: []const u32, g: Geometry) void {
     if (copy.dev != null) return; // host-backed only (TF_MOM_ADOPT_HOST)
     const st = @min(g.stateBytes(), copy.host.bytes.len);
     var namebuf: [64]u8 = undefined;
     const name = std.fmt.bufPrint(&namebuf, "/tmp/tf_mom_ctl_{d}_{d}.bin", .{ prompt.len, copy.at }) catch return;
     const src = copy.host.bytes[0..st];
-    if (std.fs.cwd().openFile(name, .{})) |fh| {
-        defer fh.close();
+    const cwd = std.Io.Dir.cwd();
+    if (cwd.openFile(io, name, .{})) |fh| {
+        defer fh.close(io);
         const buf = e.gpa.alloc(u8, st) catch return;
         defer e.gpa.free(buf);
-        const n = fh.readAll(buf) catch return;
+        const n = fh.readPositionalAll(io, buf, 0) catch 0;
         if (n != st) {
             std.log.warn("qwen3_5: adopt control: short control file ({d} of {d})", .{ n, st });
             return;
@@ -604,9 +605,10 @@ fn controlCheck(e: *Engine, copy: *Copy, prompt: []const u32, g: Geometry) void 
         while (k < st and buf[k] == src[k]) : (k += 1) {}
         controlResult(k == st, k, st);
     } else |_| {
-        var fh = std.fs.cwd().createFile(name, .{}) catch return;
-        defer fh.close();
-        fh.writeAll(src) catch {};
+        cwd.writeFile(io, .{ .sub_path = name, .data = src }) catch |err| {
+            std.log.warn("qwen3_5: adopt control: cannot create {s}: {s}", .{ name, @errorName(err) });
+            return;
+        };
         std.log.warn("qwen3_5: adopt control: stored {s} ({d} bytes)", .{ name, st });
     }
 }
