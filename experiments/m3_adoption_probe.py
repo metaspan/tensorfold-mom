@@ -153,15 +153,23 @@ def main() -> int:
         kill(p)
     time.sleep(4)
 
-    # C. audit-only boot: the same conversation goes to the parent (sink) then to the
+    # C. audit-only boot, run TWICE: the same conversation goes to the parent (sink) then to the
     # nested engine COLD (adoption suppressed). Its cold save at the same cut compares
     # byte-for-byte against the parent's kept copy -- including the GDN state block,
     # which is fresh in a cold pass. A clean cold audit plus a broken adopt narrows the
     # fault to the resume path; a dirty cold audit names the wrong piece of the map.
-    p = boot({"TF_MOM_ADOPT": "1", "TF_MOM_ADOPT_AUDIT": "1",
-              "TF_MOM_ADOPT_HOST": "1", "TF_MOM_AUDIT_COLD": "1"})
+    # The second boot is the same-engine determinism control: its nested cold save must
+    # match the first boot's (stored under /tmp/tf_mom_ctl_*) or prefill is not bitwise
+    # reproducible and cross-engine byte-equal resume is out of reach by construction.
+    import glob as _glob
+    for _f in _glob.glob("/tmp/tf_mom_ctl_*.bin"):
+        os.remove(_f)
     cold = ["<boot-failed>"]
-    if p is not None:
+    for _round in range(2):
+        p = boot({"TF_MOM_ADOPT": "1", "TF_MOM_ADOPT_AUDIT": "1",
+                  "TF_MOM_ADOPT_HOST": "1", "TF_MOM_AUDIT_COLD": "1"})
+        if p is None:
+            break
         try:
             _ = replay(BIG_NAME, user_turns, replies)
             hist = [{"role": "system", "content": SYSTEM}]
@@ -177,11 +185,12 @@ def main() -> int:
                 cold = [f"<error {e}>"]
         finally:
             kill(p)
+        time.sleep(4)
     # Only the real thing counts: 'adopted the paired engine's kept state' from adoptMiss.
     # (The parent's 'adopt sink at ...' save lines would otherwise make the gate vacuous.)
     lines = open(LOG).read().splitlines()
     adopted_lines = [l for l in lines if "adopted the paired" in l.lower()]
-    audit_lines = [l for l in lines if "adopt audit" in l.lower()]
+    audit_lines = [l for l in lines if "adopt audit" in l.lower() or "adopt control" in l.lower()]
     json.dump({"baseline": base, "adopted": adopt, "cold": cold,
                "log_adopt_lines": adopted_lines, "log_audit_lines": audit_lines},
               open(f"{OUT}/g3.json", "w"), indent=1)

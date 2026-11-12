@@ -226,6 +226,7 @@ pub fn save(ptr: *anyopaque, owner: ?*anyopaque, at: u32) anyerror!*anyopaque {
         for (s.chunks, 0..) |c, i| std.log.info("qwen3_5: adopt audit cut {d} = {d}", .{ i, c });
     }
     const copy = try saveCache(t.e, cache, at, t.seen.get(s) orelse &.{}, t.device and t.ctx == null and !keep_host);
+    if (keep_host and std.c.getenv("TF_MOM_AUDIT_COLD") != null) controlCheck(t.e, copy, s.prompt(), t.e.g);
     // the audit fires either after an adoption (kv pieces only: the state block was resumed and mutated)
     // or, when TF_MOM_AUDIT_COLD is set, on this engine's own cold save (no resume: the state block is
     // byte-fresh, so a match proves the map copies exactly what the engine itself writes).
@@ -563,6 +564,54 @@ pub const AdoptAudit = struct {
     pg: Geometry,
 };
 var audit: ?AdoptAudit = null;
+
+/// Same-engine determinism control (diagnostic): remembers the last audited save's bytes;
+/// a second cold save of the same prompt on the same engine must be bit-identical to the
+/// first or prefill itself is not bitwise reproducible -- which would put cross-engine
+/// byte-equal resume out of reach until the kernel is made deterministic.
+const SaveControl = struct { copy: *Copy, tokens: []const u32 };
+var control: ?SaveControl = null;
+
+pub fn takeControl() ?SaveControl {
+    const c = control;
+    control = null;
+    return c;
+}
+
+fn controlResult(ok: bool, first_diff: usize, len: usize) void {
+    if (ok) std.log.warn("qwen3_5: adopt control: repeat save bit-identical ({d} bytes)", .{len})
+    else std.log.warn("qwen3_5: adopt control: REPEAT SAVE DIFFERS at byte {d} of {d} -- prefill is not bitwise deterministic", .{ first_diff, len });
+}
+
+/// Store/compare the state block of a cold save against the same (prompt length, at) from a
+/// previous boot -- the same-engine determinism control for the cross-engine audit.
+fn controlCheck(e: *Engine, copy: *Copy, prompt: []const u32, g: Geometry) void {
+    if (copy.dev != null) return; // host-backed only (TF_MOM_ADOPT_HOST)
+    const st = @min(g.stateBytes(), copy.host.bytes.len);
+    var namebuf: [64]u8 = undefined;
+    const name = std.fmt.bufPrint(&namebuf, "tf_mom_ctl_{d}_{d}.bin", .{ prompt.len, copy.at }) catch return;
+    const tmp = std.fs.openDirAbsolute("/tmp", .{ .write = true, .read = true }) catch return;
+    defer tmp.close();
+    const src = copy.host.bytes[0..st];
+    if (tmp.openFile(name, .{})) |fh| {
+        defer fh.close();
+        const buf = e.gpa.alloc(u8, st) catch return;
+        defer e.gpa.free(buf);
+        const n = fh.readAll(buf) catch return;
+        if (n != st) {
+            std.log.warn("qwen3_5: adopt control: short control file ({d} of {d})", .{ n, st });
+            return;
+        }
+        var k: usize = 0;
+        while (k < st and buf[k] == src[k]) : (k += 1) {}
+        controlResult(k == st, k, st);
+    } else |_| {
+        var fh = tmp.createFile(name, .{}) catch return;
+        defer fh.close();
+        fh.writeAll(src) catch {};
+        std.log.warn("qwen3_5: adopt control: stored {s} ({d} bytes)", .{ name, st });
+    }
+}
 
 pub fn takeAudit() ?AdoptAudit {
     const a = audit;
