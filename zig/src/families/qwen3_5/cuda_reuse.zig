@@ -619,6 +619,65 @@ pub fn adoptCache(ne: *Engine, cache: *Cache, copy: *Copy, m: *const AdoptMap, s
 
 // ---- MoM M3: the cross-engine adoption trigger (docs/13) ----
 
+/// MoM M4 (TF_MOM_SHARED_VERIFY): prove what the KERNEL sees, not what the host path sees.
+/// adoptVerify reads back through the host Runs path -- which resolves the skipped shared
+/// pages against the thin cache's OWN never-written pages -- so it cannot confirm the view.
+/// This mirrors the kernel's kv_row addressing exactly (parent_base + id*parent_elems +
+/// piece pitch ptok*row + row*HD) against the host copy the copy path would have written,
+/// and checks the uploaded device table names the parent's physical ids.
+fn sharedAudit(e: *Engine, cache: *const Cache, copy: *Copy, m: *const AdoptMap,
+               sv: AdoptSink.SharedRec, pages: usize) !void {
+    if (copy.dev != null or pages == 0) return; // host-pointer compare only
+    const l: Layout = .{ .g = e.g, .format = copy.format, .cap = cache.cap, .at = m.at };
+    const row: usize = head_dim * 2;
+    const pieces = l.count() - 1;
+    const ptok: usize = sv.tokens;
+    const pitch = ptok * row; // the kernel's per-piece stride inside a page (blk * ptok * HD elements)
+    const kv_off = m.writes[1].src;
+    const cp = cache.paged orelse return;
+    // 1) the device table must name the parent's physical pages for the shared slots
+    const tb = try e.gpa.alloc(u8, pages * 4);
+    defer e.gpa.free(tb);
+    try e.d.check(e.d.api.cuMemcpyDtoHAsync_v2(@ptrCast(tb.ptr), cp.table.ptr, tb.len, e.stream.handle), "cuMemcpyDtoHAsync");
+    _ = e.stream.synchronize() catch {};
+    var table_ok = true;
+    for (0..pages) |p| {
+        const want: [4]u8 = @bitCast(sv.ids[p]);
+        table_ok = table_ok and std.mem.eql(u8, tb[p * 4 ..][0..4], &want);
+    }
+    // 2) the kernel's page addressing must land on the parent's bytes
+    const buf = try e.gpa.alloc(u8, pieces * pitch);
+    defer e.gpa.free(buf);
+    var ok_pages: usize = 0;
+    for (0..pages) |p| {
+        const rows = @min(ptok, m.at - p * ptok);
+        const addr = sv.base + @as(u64, sv.ids[p]) * @as(u64, sv.elems) * 2;
+        try e.d.check(e.d.api.cuMemcpyDtoHAsync_v2(@ptrCast(buf.ptr), addr, buf.len, e.stream.handle), "cuMemcpyDtoHAsync");
+        _ = e.stream.synchronize() catch {};
+        var bad: ?struct { k: usize, b: usize, d: u8, s: u8 } = null;
+        var k: usize = 0;
+        while (k < pieces and bad == null) : (k += 1) {
+            const src = copy.host.bytes.ptr + kv_off + k * m.at * row;
+            const got = buf[k * pitch ..][0 .. rows * row];
+            var by: usize = 0;
+            while (by < got.len) : (by += 1) {
+                if (got[by] != src[by]) {
+                    bad = .{ .k = k, .b = by, .d = got[by], .s = src[by] };
+                    break;
+                }
+            }
+        }
+        if (bad) |x| {
+            std.log.warn("qwen3_5: adopt shared audit page {d}: piece {d} byte {d} dev={x:0>2} want={x:0>2} (table {s})", .{
+                p, x.k, x.b, x.d, x.s, if (table_ok) "ok" else "MISMATCH",
+            });
+        } else ok_pages += 1;
+    }
+    std.log.warn("qwen3_5: adopt shared audit: {d} of {d} kernel-resolved pages match the copy (table {s})", .{
+        ok_pages, pages, if (table_ok) "ok" else "MISMATCH",
+    });
+}
+
 /// Post-adopt readback: the audit proves the kept bytes; this proves they landed in the
 /// device buffers the engine will actually read. A mismatch names the piece and offset;
 /// an ok verdict moves the fault to what the engine reads (slot, not store).
@@ -1010,6 +1069,10 @@ pub fn adoptMiss(ptr: *anyopaque, owner: ?*anyopaque, prompt: []const u32) anyer
         cache.shared = .{ .parent_base = sv.base, .parent_elems = sv.elems, .pages = view_pages };
         cache.shared_hold = .{ .ctx = sv.owner, .release = &pages_mod.Pages.releaseShared, .ids = view_hold.? };
         std.log.warn("qwen3_5: adopt shared view: {d} pages resolve into the parent arena at {x}", .{ view_pages, sv.base });
+        if (std.c.getenv("TF_MOM_SHARED_VERIFY") != null) {
+            sharedAudit(t.e, cache, b.copy, &b.map, sv, view_pages) catch |err|
+                std.log.warn("qwen3_5: adopt shared audit: error {}", .{err});
+        }
     }
     // arm the byte audit: the nested engine's next save of this prompt is the ground truth (diagnostic)
     if (AdoptMap.buildParams(t.e.gpa, b.pe.g, t.e.g, formatOf(t.e), b.map.at)) |dm| {
