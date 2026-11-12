@@ -190,6 +190,7 @@ Origin: `docs-mom/reviews/2026-11-12-perplexity-review.md` (tasks in its §9, MV
 - Done when: `test-kv-pool` gains a randomized (adopt/growth/resume/evict/drop) sequence property test against a host shadow of pool, page table, AdoptMap, SharedView, including EVERY kernel-side resolution site as a modeled reader; plus debug-only point-of-use row checksum during decode behind `TF_MOM_SHARED_VERIFY`.
 - Refs: perplexity review §4.4; commits ed4334c, b55814f, 7618be0
 - Status: check - none exists; complements the toy-pair harness (engine-in-the-loop) with a pure-host model. To precede any M4-class device spend beyond the current window.
+- Status: partial (2026-11-12, df94ab389 on mom/main) - `zig/src/core/kv_pool_sharedview_shadow_test.zig` added to `test-kv-pool`: host shadow of pool (pin/refcount/reissue guard), owner Wholesale reupload from offset 0, adopt-time pins, the view's own skvi, and ALL FOUR kernel reader sites (kv_row, Bf16Tiles kp/vp, near-page fast-path, tf_q35_attn_partial_paged) as independent formula transcriptions. Randomized property test (5 seeds; growth / resume reupload / parent decode) passes; the bite test injects each historical bug (shared-via-pt, near-ids-via-pt, adopt pairing off-by-one, audit zero-window) and each is caught. REMAINING for full BL-22: AdoptMap/evict/drop ops in the op alphabet, and the debug-only point-of-use row checksum under TF_MOM_SHARED_VERIFY.
 
 ### BL-23: Reframe S1 conclusion + GDN/memory honesty in docs
 - Priority: P2
