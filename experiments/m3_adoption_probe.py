@@ -171,7 +171,8 @@ def main() -> int:
     adopt_list: list[str] = []
     ctl_present = bool(_glob.glob("/tmp/tf_mom_ctl_*.bin"))
     for _round in range(2 + (1 if ctl_present else 0)):
-        benv = {"TF_MOM_ADOPT": "1", "TF_MOM_ADOPT_HOST": "1", "TF_MOM_ADOPT_VERIFY": "1"}
+        benv = {"TF_MOM_ADOPT": "1", "TF_MOM_ADOPT_HOST": "1", "TF_MOM_ADOPT_VERIFY": "1",
+                "TF_MOM_ADOPT_SANITIZE": "1"}
         if _round == 2:  # diagnostic: state block replaced by the nested engine's own cold save
             benv["TF_MOM_ADOPT_OWN_BYTES"] = "1"
         p = boot(benv)

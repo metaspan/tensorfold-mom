@@ -491,6 +491,37 @@ pub fn adoptCache(ne: *Engine, cache: *Cache, copy: *Copy, m: *const AdoptMap) !
     errdefer if (ne.stream.synchronize()) |_| {
         copy.reading = false;
     } else |_| std.log.warn("qwen3_5: a failed adopt's stream did not drain: the parent copy stays", .{});
+    // The thin engine's own cold save holds finite recurrences and conv tails where the parent's
+    // state block can carry non-finite bytes the parent's kernels never read (a dead head's
+    // stale recurrence; a tail tap past the window). The nested resume DOES read them and the
+    // logits go NaN. Zeroing non-finite state values restores the bytes a fresh nested buffer
+    // holds -- the values the thin engine would have produced itself.
+    if (std.c.getenv("TF_MOM_ADOPT_SANITIZE") != null and copy.dev == null) {
+        const recb = ne.g.recBytes();
+        const convb = ne.g.convBytes();
+        const region = recb + convb;
+        const base: [*]u8 = @ptrCast(copy.host.bytes.ptr + m.writes[0].src);
+        var zr: usize = 0;
+        var zc: usize = 0;
+        var d: usize = 0;
+        while (d < ne.g.deltas()) : (d += 1) {
+            const rec = @as([*]f32, @alignCast(@ptrCast(base + d * region)))[0 .. recb / 4];
+            for (rec) |*v| {
+                if (!std.math.isFinite(v.*)) {
+                    v.* = 0;
+                    zr += 1;
+                }
+            }
+            const conv = @as([*]u16, @alignCast(@ptrCast(base + d * region + recb)))[0 .. convb / 2];
+            for (conv) |*v| {
+                if ((v.* & 0x7F80) == 0x7F80 and (v.* & 0x007F) != 0) {
+                    v.* = 0;
+                    zc += 1;
+                }
+            }
+        }
+        std.log.warn("qwen3_5: adopt sanitize: zeroed {d} rec f32 and {d} conv bf16 non-finite(s)", .{ zr, zc });
+    }
     // the state block, piece by piece (never paged)
     {
         const p0 = l.piece(0);
