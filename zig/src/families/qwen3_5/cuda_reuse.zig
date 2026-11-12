@@ -829,6 +829,11 @@ fn diffAudit(a: AdoptAudit, copy: *Copy, compare_state: bool) void {
     }
     var off: usize = 0;
     var bad: usize = 0;
+    if (compare_state) { // does the parent's state hold non-finites the engine's own save lacks?
+        const pc = regionScan(a.pg, a.parent_copy.host.bytes, 0);
+        const cc = regionScan(a.pg, copy.host.bytes, 0);
+        std.log.warn("qwen3_5: adopt audit scan: parent {d} nonfinite, cold {d}", .{ pc, cc });
+    }
     for (a.map.writes, 0..) |w, i| {
         defer off += w.len;
         if (i == 0 and !compare_state) continue; // after a resume the state block holds the forward's writes, not the copy's
