@@ -58,6 +58,15 @@ pub const Paged = struct {
     }
 };
 
+/// MoM M4 (docs/14): the pool references a thin cache holds on its parent's pages while
+/// `Cache.shared` points into the parent arena. `ctx`/`release` are type-erased so this
+/// module never imports cuda_pages.zig (which imports it); pages_mod.releaseShared is the pair.
+pub const SharedHold = struct {
+    ctx: *anyopaque,
+    release: *const fn (*anyopaque, []const u32) void,
+    ids: []u32,
+};
+
 /// MoM M4 (docs/14): a thin engine reading the parent's KV pages in place. The first `pages`
 /// logical pages of this cache's table hold the parent's PHYSICAL page ids and resolve into the
 /// parent arena (`parent_base`, `parent_elems` per page); positions past them use this cache's
@@ -141,6 +150,8 @@ pub const Cache = struct {
     paged: ?Paged = null,
     /// MoM M4: the zero-copy prefix of a parent cache's pages (docs/14); pages 0: none.
     shared: SharedView = .{},
+    /// MoM M4: the parent-pool references to release when this cache closes (set with `shared`).
+    shared_hold: ?SharedHold = null,
     /// A pool lane's drafter ring in its run (the drafter borrows it for the lane's stream).
     drafter_ring: ?u64 = null,
     delta: i32 = 0,

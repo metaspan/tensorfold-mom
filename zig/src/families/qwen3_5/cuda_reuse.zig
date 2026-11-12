@@ -5,6 +5,7 @@ const lanes = @import("lanes");
 const geometry = @import("cuda_geometry.zig");
 const engine = @import("cuda_engine.zig");
 const caches = @import("cuda_cache.zig");
+const pages_mod = @import("cuda_pages.zig");
 const kvdumpWriter = @import("cuda_kvdump.zig");
 
 const Engine = engine.Engine;
@@ -50,6 +51,9 @@ pub const Target = struct {
     device: bool = false, // an integrated GPU: saves go to device memory, unless the disk tier reads them (ctx)
     /// TF_MOM_KVDUMP's files are written through this (cuda_kvdump.zig, docs/12 S1).
     io: std.Io,
+    /// MoM M4 (docs/14): the engine's pool pages (set by cuda_native once attached); a parent
+    /// target pins its kept pages here for the thin engine's shared view.
+    pages: ?*pages_mod.Pages = null,
     /// MoM M3 (docs/13): when set (the parent side, TF_MOM_ADOPT), `save` records its last
     /// kept state here so the paired thin engine can adopt it; `drop` retires the record.
     adopt_sink: ?*AdoptSink = null,
@@ -62,6 +66,18 @@ pub const AdoptSink = struct {
     at: u32 = 0,
     tokens: []const u32 = &.{},
     live: bool = false,
+    /// MoM M4 (docs/14): the kept state's whole pages, pinned in the parent's pool for the
+    /// thin engine to read in place; set by `save` beside the record, released by `clear`.
+    shared: ?SharedRec = null,
+
+    /// One keep's parent pages: the ids (pinned), the arena they live in and the page shape.
+    pub const SharedRec = struct {
+        owner: *anyopaque, // the parent Pages (releaseShared's ctx)
+        ids: []u32, // whole pages of [0..at), pinned once here
+        base: u64, // the parent KV arena's base
+        elems: usize, // a page's bf16 elements (Seg.sps)
+        tokens: u32, // the parent's page tokens (the view gate)
+    };
 
     /// Take ownership of a fresh token copy standing after `at` tokens of `copy`.
     pub fn record(self: *AdoptSink, a: std.mem.Allocator, copy: *anyopaque, at: u32, prompt: []const u32) !void {
@@ -73,6 +89,7 @@ pub const AdoptSink = struct {
 
     /// Retire the record (a drop of the recorded copy, or a take-over by `record`).
     pub fn clear(self: *AdoptSink, a: std.mem.Allocator) void {
+        if (self.shared) |s| pages_mod.Pages.releaseShared(s.owner, s.ids); // MoM M4: the pins go with the record
         if (self.tokens.len != 0) a.free(self.tokens);
         self.* = .{};
     }
@@ -214,6 +231,20 @@ pub fn bytes(ptr: *anyopaque, at: u32) u64 {
     return (Layout{ .g = t.e.g, .format = formatOf(t.e), .cap = 0, .at = at }).total();
 }
 
+/// MoM M4 (docs/14): the pages behind a parent's keep, pinned in its pool for the thin
+/// engine's shared view; null when no view can apply (off, unpaged, fp8 rows, no whole
+/// page, bookkeeping OOM — each of those just means the copy path does everything).
+fn sharedPages(t: *Target, cache: *const Cache, at: usize) ?AdoptSink.SharedRec {
+    if (std.c.getenv("TF_MOM_SHARED_VIEW") == null) return null;
+    const p = t.pages orelse return null;
+    const pg = cache.paged orelse return null;
+    if (formatOf(t.e) != .bf16) return null; // the fp8 scale tail is not exposed (sharedViewOk)
+    const np = at / pg.tokens;
+    if (np == 0) return null;
+    const ids = p.holdShared(pg.ids[0..np]) catch return null;
+    return .{ .owner = p, .ids = ids, .base = pg.base, .elems = pg.elems(t.e.g, false), .tokens = @intCast(pg.tokens) };
+}
+
 /// Copy the stream's state after `at` prompt tokens; its prompt pass stands there.
 pub fn save(ptr: *anyopaque, owner: ?*anyopaque, at: u32) anyerror!*anyopaque {
     const t: *Target = @ptrCast(@alignCast(ptr));
@@ -253,7 +284,12 @@ pub fn save(ptr: *anyopaque, owner: ?*anyopaque, at: u32) anyerror!*anyopaque {
     // MoM M3 (docs/13): the paired thin engine adopts from this record; a bookkeeping OOM just keeps the previous record.
     if (t.adopt_sink) |sink| {
         sink.record(t.e.gpa, copy, at, s.prompt()) catch {};
-        if (sink.live) std.log.info("qwen3_5: adopt sink at {d} of {d} prompt tokens", .{ sink.at, sink.tokens.len });
+        if (sink.live) {
+            // MoM M4 (docs/14): pin this keep's whole pages so the thin engine can read them
+            // in place instead of adopting their bytes. Any failure here just means no view.
+            sink.shared = sharedPages(t, cache, at);
+            std.log.info("qwen3_5: adopt sink at {d} of {d} prompt tokens{s}", .{ sink.at, sink.tokens.len, if (sink.shared != null) " (shared view)" else "" });
+        }
     }
     // TF_MOM_KVDUMP (docs/12 S1): the same checkpoint lands in the dump directory; a failed dump never fails the save.
     if (kvdumpWriter.dumpDir() != null) {
@@ -484,7 +520,7 @@ pub fn adoptable(pe: *const Engine, ne: *const Engine, copy: *const Copy, cap_n:
 /// Write the adopted bytes into `cache` and make it stand at `at`, exactly as
 /// a same-engine restore would. The parent copy is NOT owned here: it stays
 /// in the parent's reuse store and may still be restored by its own engine.
-pub fn adoptCache(ne: *Engine, cache: *Cache, copy: *Copy, m: *const AdoptMap) !void {
+pub fn adoptCache(ne: *Engine, cache: *Cache, copy: *Copy, m: *const AdoptMap, shared_pages: usize) !void {
     const l: Layout = .{ .g = ne.g, .format = copy.format, .cap = cache.cap, .at = m.at };
     if (l.count() != m.writes.len or m.writes.len == 0) return error.BadAdoption;
     copy.reading = true;
@@ -542,7 +578,9 @@ pub fn adoptCache(ne: *Engine, cache: *Cache, copy: *Copy, m: *const AdoptMap) !
         const row = head_dim * 2;
         const page_bytes = (Layout{ .g = l.g, .format = l.format, .cap = pg.tokens, .at = pg.tokens }).kvBytes();
         const pieces = l.count() - 1;
-        var p: usize = 0;
+        // MoM M4: a shared view already resolves the first `shared_pages` pages into the
+        // parent arena — their bytes are the parent's own, so this copy starts above them.
+        var p: usize = shared_pages;
         while (p * pg.tokens < l.at) : (p += 1) {
             const rows = @min(pg.tokens, l.at - p * pg.tokens);
             const dev = pg.base + pg.ids[p] * page_bytes;
@@ -767,7 +805,7 @@ pub fn adoptEnabled() bool {
     return std.c.getenv("TF_MOM_ADOPT") != null;
 }
 
-const Candidate = struct { from: u32, copy: *Copy, map: AdoptMap, pe: *const Engine };
+const Candidate = struct { from: u32, copy: *Copy, map: AdoptMap, pe: *const Engine, sink: ?*AdoptSink = null };
 
 /// The core's cold-miss path (prompt_cache.beginUser) asks: does a registered, deeper engine keep this prompt's
 /// prefix? Takes the deepest candidate whose kept copy passes `adoptable` (same family shape, text-only, fits).
@@ -817,7 +855,7 @@ pub fn adoptMiss(ptr: *anyopaque, owner: ?*anyopaque, prompt: []const u32) anyer
             var old = b;
             old.map.free(t.e.gpa);
         }
-        best = .{ .from = @intCast(m.at), .copy = copy, .map = m, .pe = p.e };
+        best = .{ .from = @intCast(m.at), .copy = copy, .map = m, .pe = p.e, .sink = sink };
     }
     var b = best orelse return null;
     defer b.map.free(t.e.gpa);
@@ -940,7 +978,39 @@ pub fn adoptMiss(ptr: *anyopaque, owner: ?*anyopaque, prompt: []const u32) anyer
             } else |err| std.log.warn("qwen3_5: adopt own-bytes: read {s} failed: {}", .{ name, err });
         } else |err| std.log.warn("qwen3_5: adopt own-bytes: open {s} failed: {}", .{ name, err });
     }
-    try adoptCache(t.e, cache, b.copy, &b.map);
+    // MoM M4 (docs/14): zero-copy shared KV view. A parent keep that pinned its whole pages,
+    // with matching page shape and bf16 rows, lets this cache read those pages in the parent's
+    // arena: their copy is skipped and the device table carries the parent's physical ids
+    // there. The kernel routes only reads to the parent arena; every write stays in this
+    // cache's own pages. Any mismatch leaves the full copy path untouched.
+    var view: ?AdoptSink.SharedRec = null;
+    var view_pages: usize = 0;
+    var view_hold: ?[]u32 = null;
+    view: {
+        if (std.c.getenv("TF_MOM_SHARED_VIEW") == null or b.copy.dev != null) break :view;
+        const sink = b.sink orelse break :view;
+        const sv = sink.shared orelse break :view;
+        const cp = cache.paged orelse break :view;
+        if (sv.ids.len == 0 or formatOf(t.e) != .bf16) break :view;
+        if (!caches.sharedViewOk(t.e.g, b.pe.g, cp.tokens, sv.tokens, false)) break :view;
+        const n = @min(sv.ids.len, cp.ids.len);
+        if (n == 0) break :view;
+        const pp: *pages_mod.Pages = @ptrCast(@alignCast(sv.owner));
+        view_hold = pp.holdShared(sv.ids[0..n]) catch break :view; // this view's own pins, secured first
+        view = sv;
+        view_pages = n;
+    }
+    try adoptCache(t.e, cache, b.copy, &b.map, view_pages);
+    if (view) |sv| {
+        const cp = cache.paged.?;
+        // the shared slots of the device table now name the parent's physical pages (ids are
+        // physical in each engine's own arena; the kernel resolves them through skv/sps).
+        try cp.table.uploadAsync(0, std.mem.sliceAsBytes(sv.ids[0..view_pages]), t.e.stream.handle);
+        try t.e.stream.synchronize();
+        cache.shared = .{ .parent_base = sv.base, .parent_elems = sv.elems, .pages = view_pages };
+        cache.shared_hold = .{ .ctx = sv.owner, .release = &pages_mod.Pages.releaseShared, .ids = view_hold.? };
+        std.log.warn("qwen3_5: adopt shared view: {d} pages resolve into the parent arena at {x}", .{ view_pages, sv.base });
+    }
     // arm the byte audit: the nested engine's next save of this prompt is the ground truth (diagnostic)
     if (AdoptMap.buildParams(t.e.gpa, b.pe.g, t.e.g, formatOf(t.e), b.map.at)) |dm| {
         audit = .{ .parent_copy = b.copy, .map = dm, .parent_layers = b.pe.g.layers, .pg = b.pe.g };

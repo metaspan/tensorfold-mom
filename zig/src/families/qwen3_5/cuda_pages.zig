@@ -167,6 +167,13 @@ pub const Pages = struct {
             if (x.cache == cache) break x;
         } else return false;
         if (!x.used) return true;
+        // MoM M4: a shared view's parent-pool references go with the cache (the parent's
+        // pool, not this one — the hold carries its own release).
+        if (cache.shared_hold) |h| {
+            h.release(h.ctx, h.ids);
+            cache.shared_hold = null;
+        }
+        cache.shared = .{};
         cuda.completion.drain(p.e.d, p.e.stream, "qwen3_5: a closed stream did not drain");
         p.pool.releaseRun(x.run, p.layout.runPages());
         p.pool.finish(&x.lease);
@@ -203,6 +210,21 @@ pub const Pages = struct {
     pub fn owns(p: *const Pages, cache: *const Cache) bool {
         for (p.lanes) |x| if (x.cache == cache) return true;
         return false;
+    }
+
+    /// MoM M4 (docs/14): pin these parent pages for a thin engine's shared view — a copy with
+    /// one pool reference each. The thin side pairs every id with `releaseShared` on close.
+    pub fn holdShared(p: *Pages, ids: []const u32) ![]u32 {
+        const held = try p.gpa.dupe(u32, ids);
+        for (held) |id| p.pool.retain(id);
+        return held;
+    }
+
+    /// The release paired with `holdShared`, type-erased for `Cache.SharedHold`.
+    pub fn releaseShared(ctx: *anyopaque, ids: []const u32) void {
+        const p: *Pages = @ptrCast(@alignCast(ctx));
+        for (ids) |id| p.pool.release(id);
+        p.gpa.free(@constCast(ids));
     }
 
     /// A lane's new table entries uploaded to its device table.
