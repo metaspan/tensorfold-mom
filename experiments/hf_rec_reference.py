@@ -62,31 +62,38 @@ def main():
     ids = ids.to("cuda")
 
     model = AutoModelForCausalLM.from_pretrained(STUDENT, dtype=torch.bfloat16,
-                                                 device_map="cuda")
+                                                 low_cpu_mem_usage=True)
+    model.to("cuda")
+    captured = {}
+    def hook(mod, inp, out):
+        captured["out"] = out
+    tgt = None
+    for nm, mod in model.named_modules():
+        if ".layers.14." in nm and any(k in nm for k in ("linear_attn", "gated_delta", "gdn")):
+            tgt = (nm, mod)
+            break
+    if tgt is None:  # fall back: the module whose forward returns a [B,H,128,128] tensor
+        for nm, mod in model.named_modules():
+            if ".layers.14." in nm and type(mod).__name__.lower().find("attn") >= 0:
+                tgt = (nm, mod)
+                break
+    assert tgt is not None, "layer-14 GDN module not found"
+    print("hooking", tgt[0], type(tgt[1]).__name__)
+    h = tgt[1].register_forward_hook(hook)
     model.eval()
     with torch.no_grad():
         out = model(ids, use_cache=True)
-    cache = out.past_key_values
-    states = []
-    layers = getattr(cache, "layers", None)
-    if layers is not None and any(getattr(ly, "recurrent_state", None) is not None for ly in layers):
-        for ly in layers:
-            rs = getattr(ly, "recurrent_state", None)
-            if rs is not None:
-                states.append(rs)
-    elif hasattr(cache, "recur"):
-        for e in cache.recur:
-            if e is not None:
-                states.append(e)
-    else:
-        rsd = getattr(cache, "recurrent_states", None) or getattr(cache, "slab_states", None)
-        assert rsd is not None, f"unknown cache layout {type(cache)}: {[a for a in dir(cache) if not a.startswith('_')]}"
-        for e in rsd:
-            if e is not None:
-                states.append(e)
-    print(f"linear states: {len(states)} (expect 12)")
-    assert len(states) == 12
-    s = states[11][0].float().cpu().numpy()  # [HV, ?, ?]
+    h.remove()
+    o = captured.get("out")
+    cands = []
+    if isinstance(o, torch.Tensor):
+        cands = [o]
+    elif isinstance(o, (tuple, list)):
+        cands = [x for x in o if torch.is_tensor(x)]
+    states = [x for x in cands if x.dim() == 4 and 128 in x.shape[-2:]]
+    print("captured tensors:", [(tuple(x.shape), str(x.dtype)) for x in cands])
+    assert states, f"no [B,H,128,128] recurrent state captured; got {[tuple(x.shape) for x in cands]}"
+    s = states[0][0].float().cpu().numpy()
     print("hf state shape:", s.shape)
 
     P = engrec("/tmp/tf_mom_ctl_186_179_L40.bin")
