@@ -132,7 +132,7 @@ def main() -> int:
     # long prompt, cold for the nested store, warm in the parent's sink). Replaying
     # every turn self-hits the nested store and adoption can never fire (run 1:
     # hits 7, misses 1 -- the lone cold miss was turn 1, too short vs the deep sink).
-    p = boot({"TF_MOM_ADOPT": "1", "TF_MOM_ADOPT_HOST": "1"})
+    p = boot({"TF_MOM_ADOPT": "1", "TF_MOM_ADOPT_HOST": "1", "TF_MOM_ADOPT_VERIFY": "1"})
     if p is None:
         return 2
     adopt = ["<boot-failed>"]

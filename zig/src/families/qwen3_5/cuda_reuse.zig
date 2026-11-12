@@ -538,6 +538,7 @@ pub fn adoptCache(ne: *Engine, cache: *Cache, copy: *Copy, m: *const AdoptMap) !
         }
     }
     try ne.stream.synchronize();
+    if (std.c.getenv("TF_MOM_ADOPT_VERIFY") != null) adoptVerify(ne, cache, copy, m);
     copy.reading = false;
     cache.len = m.at;
     cache.written = m.at;
@@ -547,6 +548,45 @@ pub fn adoptCache(ne: *Engine, cache: *Cache, copy: *Copy, m: *const AdoptMap) !
 }
 
 // ---- MoM M3: the cross-engine adoption trigger (docs/13) ----
+
+/// Post-adopt readback: the audit proves the kept bytes; this proves they landed in the
+/// device buffers the engine will actually read. A mismatch names the piece and offset;
+/// an ok verdict moves the fault to what the engine reads (slot, not store).
+fn adoptVerify(ne: *Engine, cache: *const Cache, copy: *Copy, m: *const AdoptMap) void {
+    if (copy.dev != null) { // host-pointer compare only; phase B sets TF_MOM_ADOPT_HOST
+        std.log.warn("qwen3_5: adopt verify: skipped (device-backed copy; set TF_MOM_ADOPT_HOST)", .{});
+        return;
+    }
+    copy.reading = true; // parent copy must not be recycled mid-verify
+    defer copy.reading = false;
+    const l: Layout = .{ .g = ne.g, .format = copy.format, .cap = cache.cap, .at = m.at };
+    const a = ne.gpa;
+    var ok_pieces: usize = 0;
+    const n_pieces = l.count();
+    var i: usize = 0;
+    while (i < n_pieces) : (i += 1) {
+        const p = l.piece(i);
+        const buf = a.alloc(u8, p.len) catch return;
+        defer a.free(buf);
+        var it = Runs.of(cache, l, i, p);
+        while (it.next()) |r| {
+            const at = r.at;
+            const got = ne.d.api.cuMemcpyDtoHAsync_v2(@ptrCast(buf.ptr + at), r.dev, r.len, ne.stream.handle);
+            if (got != 0) {
+                std.log.warn("qwen3_5: adopt verify piece {d}: DtoH failed {d}", .{ i, got });
+                return;
+            }
+        }
+        _ = ne.stream.synchronize() catch {};
+        const src: [*]const u8 = if (copy.dev) |b| @ptrFromInt(b.ptr + m.writes[i].src) else @ptrCast(copy.host.bytes.ptr + m.writes[i].src);
+        var k: usize = 0;
+        while (k < p.len and buf[k] == src[k]) : (k += 1) {}
+        if (k == p.len) ok_pieces += 1 else std.log.warn(
+            "qwen3_5: adopt verify piece {d} MISMATCH at byte {d} of {d}", .{ i, k, p.len },
+        );
+    }
+    std.log.warn("qwen3_5: adopt verify: {d} of {d} device pieces match the copy", .{ ok_pieces, n_pieces });
+}
 
 /// Live qwen3_5 lane targets (registered by cuda_native.zig); the pair is found at adopt time, never wired at open.
 var open_targets: [4]?*Target = .{ null, null, null, null };
