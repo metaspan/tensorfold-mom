@@ -790,6 +790,22 @@ pub fn adoptMiss(ptr: *anyopaque, owner: ?*anyopaque, prompt: []const u32) anyer
     }
     var b = best orelse return null;
     defer b.map.free(t.e.gpa);
+    // Experiment (TF_MOM_ADOPT_OWN_BYTES): overwrite the state block in the parent copy with
+    // THIS engine's own cold-save bytes (persisted by the determinism control) before adopting.
+    // Finite decode => the resume path is sound and parent-specific bytes were the poison;
+    // still non-finite => the bug is in the resume, not the bytes.
+    if (std.c.getenv("TF_MOM_ADOPT_OWN_BYTES") != null and b.copy.dev == null) {
+        var namebuf: [64]u8 = undefined;
+        const name = std.fmt.bufPrint(&namebuf, "/tmp/tf_mom_ctl_{d}_{d}.bin", .{ prompt.len, b.map.at }) catch return null;
+        const st = @min(t.e.g.stateBytes(), b.copy.host.bytes.len);
+        const cwd = std.Io.Dir.cwd();
+        if (cwd.openFile(t.io, name, .{})) |fh| {
+            defer fh.close(t.io);
+            if (fh.readPositionalAll(t.io, b.copy.host.bytes[0..st], 0)) |_| {
+                std.log.warn("qwen3_5: adopt own-bytes: state block replaced with {s} ({d} bytes)", .{ name, st });
+            } else |err| std.log.warn("qwen3_5: adopt own-bytes: read {s} failed: {}", .{ name, err });
+        } else |err| std.log.warn("qwen3_5: adopt own-bytes: open {s} failed: {}", .{ name, err });
+    }
     try adoptCache(t.e, cache, b.copy, &b.map);
     // arm the byte audit: the nested engine's next save of this prompt is the ground truth (diagnostic)
     if (AdoptMap.buildParams(t.e.gpa, b.pe.g, t.e.g, formatOf(t.e), b.map.at)) |dm| {
