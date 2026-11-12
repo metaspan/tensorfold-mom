@@ -61,8 +61,9 @@ def main():
 
     # 2) boot engine single-lane with kvdump
     os.makedirs(DUMPDIR, exist_ok=True)
-    for f in os.listdir(DUMPDIR):
-        os.remove(os.path.join(DUMPDIR, f))
+    import shutil
+    shutil.rmtree(DUMPDIR, ignore_errors=True)
+    os.makedirs(DUMPDIR, exist_ok=True)
     log = open("/tmp/engine_vs_hf_server.log", "w")
     env = os.environ.copy()
     env["TF_QWEN_REQUEST_STARTS"] = "1"
@@ -83,7 +84,7 @@ def main():
         return 2
     try:
         r = post("/v1/chat/completions", {"model": "nested", "messages": hist,
-                                          "max_tokens": 12, "temperature": 0,
+                                          "max_tokens": 24, "temperature": 0,
                                           "chat_template_kwargs": {"enable_thinking": False}})
     finally:
         p.terminate()
@@ -92,11 +93,16 @@ def main():
         except subprocess.TimeoutExpired:
             p.kill()
     choice = r["choices"][0]
-    eng_text = choice["text"]
-    print("engine completion (12 greedy tokens):", repr(eng_text))
+    msg = choice.get("message", {})
+    eng_text = msg.get("content") or msg.get("reasoning_content") or ""
+    print("engine completion (greedy):", repr(eng_text))
 
     # 3) token identity proof via the engine's own dump
-    ck2 = load_model_dir(DUMPDIR)
+    dump_dir = DUMPDIR
+    sub = os.path.join(DUMPDIR, "qwen36-nested-16l")
+    if os.path.isdir(sub) and os.listdir(sub):
+        dump_dir = sub
+    ck2 = load_model_dir(dump_dir)
     items2 = list(ck2.values()) if isinstance(ck2, dict) else list(ck2)
     got = list(items2[-1].token_ids)
     same = got[:179] == want
@@ -112,10 +118,10 @@ def main():
                                                  low_cpu_mem_usage=True)
     model.to("cuda")
     model.eval()
-    ids = torch.tensor([got], device="cuda")
+    ids = torch.tensor([got], device="cuda", dtype=torch.long)
     hf_ids = []
     with torch.no_grad():
-        for _ in range(12):
+        for _ in range(24):
             out = model(ids, use_cache=False)
             nxt = int(out.logits[0, -1].float().argmax())
             hf_ids.append(nxt)
