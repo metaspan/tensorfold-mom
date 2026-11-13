@@ -195,6 +195,16 @@ Origin: `docs-mom/reviews/2026-11-12-perplexity-review.md` (tasks in its §9, MV
 - Done when: (1) bf16/HF offline tail distillation on hundreds of millions of mixed-chat tokens (logit KD, teacher = 35B); (2) parity eval vs stock Qwen3.5-2B on a few hundred held-out trivial items, threshold PRE-REGISTERED; (3) thin-decode tok/s measured (if slower than the 2B's 171 tok/s there is no routing case); (4) written programme kill criterion in the gate ledger (e.g. "no 2B parity within N GPU-hours -> re-scope to drafter/cascade, pause M4").
 - Refs: perplexity review §4.1; Minitron (nvlabs/minitron)
 - Status: check - distill v2 (queued) partially satisfies (1)-(2) at small scale; its gate (>=10/12 coherent) is not parity-vs-2B. This item gates all further device spend per reviewer §9.5.
+- Status 2026-11-13: DECISION (user): route (b) — build an MTP drafter head for the nested checkpoint. Zero-shot control: parent's own MTP head copied verbatim beside the thin checkpoint (experiments/mtp_merge.py -> qwen36-nested-16l-mtp), serve --drafter, drafts=on, accepted 1/40 (~2.5%) and decode 130.9 tok/s (slower than stock 141.9) — the parent-trained head cannot draft on the student tail's hidden; training the head on the student is required. Head training tracked as BL-30.
+
+### BL-30: MTP drafter head trained on the nested student (unblocks the BL-6 decode bar / routing case)
+- Priority: P1
+- Area: distill
+- Scope: MVP
+- Why: thin decode 141.9 (stock) and 141.4 (BL-6T tuned) sit under the pre-registered >=154 bar; BL-6T showed the ceiling is intrinsic without a drafter. The engine already serves the MoE target's own MTP layer as a drafter (cuda_drafter_open.openMtp, tap = target's last layer, affine-4 quantized tables at load); the thin checkpoint just lacks mtp.* tensors. Zero-shot parent head accepted ~2.5% (BL-21 status above), so the head must be trained against the gated student's hidden.
+- Done when: (1) PyTorch replica of the 19-tensor MTP layer (fc 2048x4096 from pre-normed [embedding;hidden], 1 GQA+MoE decoder layer, norm) trained with teacher-forced CE on student-captured pre-norm residual + next-token embeddings over the distill corpus + on-policy rollouts; (2) acceptance-rate measurement in serve: mean tok/s >= the BL-6 pre-registered decode bar 154 on the same 3 prompts x 3 variants; TTFT guard unchanged; (3) head bytes shipped beside the student via experiments/mtp_merge.py (NEVER requantized after training; the engine quantizes draft tables at load itself).
+- Refs: docs-mom/gates/20261113-bl6t-tuned-decode.md (intrinsic-ceiling finding); zig/src/families/qwen3_5/cuda_mtp.zig (interface: hidden tap layers-1, follow ids, TF_MTP_DRAFTS depth); HF transformers 5.8.1 has NO qwen3_5_moe MTP module — replica from the parent's tensor shapes + engine absorb semantics.
+- Status: open. Zero-shot control done (1/40 accepted); trainer not yet written.
 
 ### BL-22: Host-side shadow model + property tests for pool/table/AdoptMap/SharedView; point-of-use checksum
 - Priority: P1
