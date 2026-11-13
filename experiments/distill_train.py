@@ -165,6 +165,17 @@ def main() -> int:
         del shard
         print(f"saved {fname} ({len(keys)} tensors)")
     json.dump(index, open(os.path.join(args.out_dir, "model.safetensors.index.json"), "w"))
+    # The engine loads qwen3_5 checkpoints only in the VL-form config (top-level
+    # qwen3_5_moe + text_config, no quantization_config for bf16 students); a bare
+    # Qwen3_5MoeForCausalLM config gets "no backend for qwen3_5_moe_text" or, with a
+    # quantized config copied in, demands FP4 scale tensors (MissingTensor). Ship the
+    # loadable bf16-variant config with the student so the gate/serve boot directly.
+    import shutil as _shutil
+    serve_cfg = os.environ.get("DISTILL_SERVE_CONFIG",
+                               "/home/derek/models/tensorfold-mom/qwen36-nested-16l-bf16/config.json")
+    if os.path.exists(serve_cfg):
+        _shutil.copy(serve_cfg, os.path.join(args.out_dir, "config.json"))
+        print(f"wrote config.json from {serve_cfg}")
     tok.save_pretrained(args.out_dir)
     # record provenance so M3 can gate on the frozen digest staying unchanged
     meta = {"frozen_layers": FROZEN_LAYERS, "trainable": len(trainable),
