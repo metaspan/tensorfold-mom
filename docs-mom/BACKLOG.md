@@ -130,6 +130,7 @@ Priorities are the reviewer's unless amended here, with the amendment reason.
 - Done when: thousands of rows; held-out G2 set 200+ items vs stock Qwen3.5-2B vs plain truncation baseline; frozen-N sweep; early-exit-head baseline at 35B layer N.
 - Refs: review item 12 arXiv links (LLM Pruning/Shearing, Minitron, arxiv 2403.17887)
 - Status: check - distill v2 window (96 seeds, thinking rows, pre-registered ≥10/12 gate) is staged and queued; this item extends, not replaces, it. Gated on BL-6 verdict per reviewer.
+- Status 2026-11-13: t1 COHERENCE GATE FAIL 0/12 (distill_gate --engine hf amendment — the native engine categorically refuses bf16 MoE, cuda_geometry.zig:290; items/bar/rules unchanged, pre-run amendment documented in the script docstring). Replies are G2-floor salad ('2', 'esesese' loops, multilingual fragments), 0 template leaks; weights load 279/279 (export structurally sound). Cause confirmed as scale: DISTILL.json shows 175 rows (~20K tokens) x 2 epochs @ lr 1e-5 on 104 tail tensors — far below the recipe's stated need. This is the measured instantiation of "175-row corpus can't reach coherence". Scale-up (this item) is the prerequisite for BL-30 head training (the head must train on the GATED student's hidden, or it retrains every tail epoch).
 
 ## P3
 
@@ -204,7 +205,7 @@ Origin: `docs-mom/reviews/2026-11-12-perplexity-review.md` (tasks in its §9, MV
 - Why: thin decode 141.9 (stock) and 141.4 (BL-6T tuned) sit under the pre-registered >=154 bar; BL-6T showed the ceiling is intrinsic without a drafter. The engine already serves the MoE target's own MTP layer as a drafter (cuda_drafter_open.openMtp, tap = target's last layer, affine-4 quantized tables at load); the thin checkpoint just lacks mtp.* tensors. Zero-shot parent head accepted ~2.5% (BL-21 status above), so the head must be trained against the gated student's hidden.
 - Done when: (1) PyTorch replica of the 19-tensor MTP layer (fc 2048x4096 from pre-normed [embedding;hidden], 1 GQA+MoE decoder layer, norm) trained with teacher-forced CE on student-captured pre-norm residual + next-token embeddings over the distill corpus + on-policy rollouts; (2) acceptance-rate measurement in serve: mean tok/s >= the BL-6 pre-registered decode bar 154 on the same 3 prompts x 3 variants; TTFT guard unchanged; (3) head bytes shipped beside the student via experiments/mtp_merge.py (NEVER requantized after training; the engine quantizes draft tables at load itself).
 - Refs: docs-mom/gates/20261113-bl6t-tuned-decode.md (intrinsic-ceiling finding); zig/src/families/qwen3_5/cuda_mtp.zig (interface: hidden tap layers-1, follow ids, TF_MTP_DRAFTS depth); HF transformers 5.8.1 has NO qwen3_5_moe MTP module — replica from the parent's tensor shapes + engine absorb semantics.
-- Status: open. Zero-shot control done (1/40 accepted); trainer not yet written.
+- Status: open. Zero-shot control done (1/40 accepted); trainer not yet written. Depends on BL-12 scale-up producing a gate-PASSING student (t1 gated 0/12 FAIL 2026-11-13, undertrained): the head's inputs are the student's hidden states, so head training runs on the final gated tail only.
 
 ### BL-22: Host-side shadow model + property tests for pool/table/AdoptMap/SharedView; point-of-use checksum
 - Priority: P1
