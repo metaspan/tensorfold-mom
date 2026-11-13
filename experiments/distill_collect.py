@@ -175,8 +175,26 @@ def main() -> int:
     ap.add_argument("--thinking-rate", type=float, default=0.2,
                     help="fraction of rows rolled with thinking ON (spec data mix)")
     ap.add_argument("--seed", type=int, default=11)
+    ap.add_argument("--seed-file", default=None,
+                    help="jsonl of extra seeds (bare strings or {\"q\": ...}); union with SEEDS")
+    ap.add_argument("--gen", type=int, default=0,
+                    help="ask the teacher to write N extra trivial-lane seeds (BL-12 scale-up)")
     args = ap.parse_args()
     rng = random.Random(args.seed)
+
+    seeds = list(SEEDS)
+    if args.seed_file:
+        for line in open(args.seed_file):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+                s = obj.get("q") if isinstance(obj, dict) else obj
+            except json.JSONDecodeError:
+                s = line
+            if isinstance(s, str) and s.strip():
+                seeds.append(s.strip())
 
     if os.path.exists(args.out):
         print(f"{args.out} exists; refusing to clobber")
@@ -201,10 +219,42 @@ def main() -> int:
                 print("health timeout"); return 2
 
         tpl_kwargs = {} if args.thinking else {"enable_thinking": False}
+
+        if args.gen:
+            # BL-12 scale-up: the teacher writes extra trivial-lane seeds across
+            # the student's traffic categories; dedup against existing seeds.
+            cats = ["short arithmetic", "unit and number conversion", "yes/no facts with one-word answers",
+                    "spelling grammar and simple fixes", "translations EN<->ES/FR/DE",
+                    "common-sense one-liners", "definitions (what does X stand for)",
+                    "counting and comparisons", "date/time arithmetic", "short coding one-liners"]
+            have = set(seeds)
+            batch = 20
+            while len(seeds) < len(SEEDS) + args.gen:
+                cat = rng.choice(cats)
+                try:
+                    r = post({"model": "heavy",
+                              "messages": [{"role": "user", "content":
+                                  f"Write {batch} diverse short user requests of this kind: {cat}. "
+                                  "One per line, no numbering, no quotes, no commentary. "
+                                  "Each must be answerable correctly in under 15 words."}],
+                              "max_tokens": 1024, "temperature": 1.0, "stream": False,
+                              "chat_template_kwargs": {"enable_thinking": False}})
+                    for line in r["choices"][0]["message"]["content"].splitlines():
+                        s = line.strip().strip('"').strip("'")
+                        s = s.split(". ", 1)[0] if s[:3].strip().rstrip('.').isdigit() else s
+                        if 8 < len(s) < 200 and s not in have:
+                            have.add(s)
+                            seeds.append(s)
+                            if len(seeds) >= len(SEEDS) + args.gen:
+                                break
+                except Exception as e:
+                    print(f"seed-gen request failed ({e}); retrying")
+            print(f"seed-gen: {len(seeds)} seeds total")
+
         seen = set()
         with open(args.out, "w") as f:
             for ep in range(args.passes):
-                for s in SEEDS:
+                for s in seeds:
                     msgs = [{"role": "user", "content": s}]
                     # spec data mix: a slice of rows carries the teacher's thinking
                     # block, captured separately (the trainer composes it into the
