@@ -376,6 +376,9 @@ pub const Cache = struct {
         try recurrent.mark(self, false);
         // the path's rows join the pending ones; without a log, with the switch off or past pend_cap they land now
         const deferred = keepLate() and self.log.len > 0 and path.len <= pend_cap;
+        if (std.c.getenv("TF_MOM_ADOPT_DUMP") != null) { // BL-29: name the keep's launches
+            std.log.warn("qwen3_5: keep: rows={d} path={d} deferred={d} grid_z={d} geo.nv={d} deltas={d} v_heads={d} recBytes={d}", .{ last.rows, path.len, @intFromBool(deferred), g.v_heads * g.deltas(), g.v_heads, g.deltas(), g.v_heads, g.recBytes() });
+        }
         if (!deferred) {
             try self.flush(e);
             try e.run(e.keeps.apply, .{ 1, geometry.dk / 4, g.v_heads * g.deltas() }, .{ 32, 4, 1 }, .{ e.geo, sg, p });
