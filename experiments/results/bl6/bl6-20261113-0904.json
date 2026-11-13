@@ -1,0 +1,95 @@
+{
+ "results": {
+  "A_stock": {
+   "rows": [
+    {
+     "variant": 0,
+     "ttft_s": 0.1088,
+     "decode_s": 0.6804,
+     "tokens": 96,
+     "tok_s": 141.1
+    },
+    {
+     "variant": 1,
+     "ttft_s": 0.1157,
+     "decode_s": 0.6776,
+     "tokens": 96,
+     "tok_s": 141.7
+    },
+    {
+     "variant": 2,
+     "ttft_s": 0.1172,
+     "decode_s": 0.6721,
+     "tokens": 96,
+     "tok_s": 142.8
+    }
+   ],
+   "adopted_lines": 0,
+   "blended_ttft": 0.1139,
+   "mean_tok_s": 141.9
+  },
+  "B_copy": {
+   "rows": [
+    {
+     "variant": 0,
+     "ttft_s": 0.0459,
+     "decode_s": 0.6669,
+     "tokens": 96,
+     "tok_s": 143.9
+    },
+    {
+     "variant": 1,
+     "ttft_s": 0.0462,
+     "decode_s": 0.6744,
+     "tokens": 96,
+     "tok_s": 142.4
+    },
+    {
+     "variant": 2,
+     "ttft_s": 0.0461,
+     "decode_s": 0.6755,
+     "tokens": 96,
+     "tok_s": 142.1
+    }
+   ],
+   "adopted_lines": 18,
+   "blended_ttft": 0.0461,
+   "mean_tok_s": 142.8
+  },
+  "C_view": {
+   "rows": [
+    {
+     "variant": 0,
+     "ttft_s": 0.0474,
+     "decode_s": 0.6579,
+     "tokens": 96,
+     "tok_s": 145.9
+    },
+    {
+     "variant": 1,
+     "ttft_s": 0.0474,
+     "decode_s": 0.6758,
+     "tokens": 96,
+     "tok_s": 142.1
+    },
+    {
+     "variant": 2,
+     "ttft_s": 0.0474,
+     "decode_s": 0.6766,
+     "tokens": 96,
+     "tok_s": 141.9
+    }
+   ],
+   "adopted_lines": 18,
+   "blended_ttft": 0.0474,
+   "mean_tok_s": 143.3
+  }
+ },
+ "ratios": {
+  "copy": 0.40474100087796316,
+  "view": 0.4161545215100966
+ },
+ "stock_tok_s": 141.9,
+ "non_vacuous": true,
+ "verdict": "NO-GO"
+}
