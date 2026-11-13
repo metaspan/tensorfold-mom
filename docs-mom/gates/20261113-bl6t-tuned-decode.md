@@ -44,3 +44,14 @@ greedy streaming turns as bl6_gate A_stock. Harness: experiments/bl6t_probe.py.
 
 ## Result
 (to be appended verbatim after the single pre-registered run)
+
+**Run 2026-11-13 09:16 UTC (results/bl6t/bl6t-20261113-0916.json): NO-GO.**
+mean 141.4 tok/s (bar ≥154), min variant 141.2 (guard ≥138 passed), 96 tokens ×
+3 variants, boot line verified `--parallel 4 --context 8192` + trivial stream
+priority. Per the pre-registered consequence: the ~142 tok/s ceiling is INTRINSIC
+to thin bf16 decode on this hardware without a drafter; no further config variants
+may be run looking for a pass. The decode bar can only be met by NEW ASSETS —
+an MTP/drafter head for the nested checkpoint, or engine decode optimizations.
+Feeds BL-21: thin decode 141.4 < Qwen3.5-2B's 171 ⇒ (3) says no routing case on
+decode alone; the routing case must stand on the adoption TTFT (0.046 s vs 0.11 s
+full prefill + parent hop) or be re-scoped — programme decision for the owner.
