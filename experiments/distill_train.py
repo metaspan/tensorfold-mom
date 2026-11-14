@@ -66,8 +66,14 @@ def main() -> int:
     ap.add_argument("--max-len", type=int, default=512)
     ap.add_argument("--eval-fraction", type=float, default=0.1)
     ap.add_argument("--seed", type=int, default=7)
+    ap.add_argument("--kd", default=None,
+                    help="path to distill_kd_prep.py top-k tensors; enables KL term")
+    ap.add_argument("--beta", type=float, default=0.5,
+                    help="KD weight: loss = (1-beta)*CE + beta*kd_T^2*KL")
+    ap.add_argument("--kd-temp", type=float, default=1.0)
     args = ap.parse_args()
     dev = "cuda" if torch.cuda.is_available() else "cpu"
+    kd_rows = torch.load(args.kd, weights_only=True) if args.kd else None
 
     tok = AutoTokenizer.from_pretrained(STUDENT)
     model = AutoModelForCausalLM.from_pretrained(STUDENT, dtype=torch.bfloat16,
@@ -94,6 +100,11 @@ def main() -> int:
 
     rows = load_rows(args.data)
     print(f"rows: {len(rows)}")
+    if kd_rows is not None:
+        assert len(kd_rows) == len(rows), f"kd rows {len(kd_rows)} != corpus {len(rows)}"
+        rows = [(m, c, kd_rows[i]) for i, (m, c) in enumerate(rows)]
+    else:
+        rows = [(m, c, None) for m, c in rows]
     # Held-out eval split (pre-registration hygiene): the coherence GATE runs on a
     # DISJOINT QA set (distill_gate.py); this split only watches overfitting.
     import random as _random
@@ -111,7 +122,7 @@ def main() -> int:
         if isinstance(t, int) and t >= 0:
             eos_ids.add(t)
 
-    def ce_on(msgs, comp):
+    def ce_on(msgs, comp, kd=None, beta=0.0, T=1.0):
         prompt = tok.apply_chat_template(msgs, add_generation_prompt=True, tokenize=False)
         full = prompt + comp + tok.eos_token
         enc = tok(full, return_tensors="pt", truncation=True, max_length=args.max_len)
@@ -120,12 +131,35 @@ def main() -> int:
         p_len = min(tok(prompt, add_special_tokens=False)["input_ids"].__len__(),
                     labels.shape[1])
         labels[:, :p_len] = -100
-        return model(input_ids=input_ids, labels=labels).loss
+        logits = model(input_ids=input_ids).logits[0]  # [n, V]
+        import torch.nn.functional as F
+        shift_logits = logits[:-1]
+        shift_labels = labels[0, 1:]
+        ce = F.cross_entropy(shift_logits.float(), shift_labels, ignore_index=-100)
+        if kd is None or beta <= 0.0:
+            return ce
+        # KL on teacher top-k, both renormalized over that set (top-k KD).
+        # Position t predicts token t+1; teacher rows are full-length (n),
+        # aligned with shift positions whose label != -100.
+        idx = kd["idx"].to(dev).long()   # [n, k]
+        val = kd["val"].to(dev).float()  # [n, k]
+        sel = shift_labels != -100       # completion positions in shift space
+        if not bool(sel.any()):
+            return ce
+        pos = sel.nonzero(as_tuple=True)[0]           # shift idx s predicts s+1
+        k = idx.shape[1]
+        # shift position s consumes logits[s] (predicts token s+1); teacher row s
+        # holds teacher logits at position s (predicts s+1). Same index.
+        gathered = torch.gather(logits[pos].float(), 1, idx[pos])
+        t_logp = torch.log_softmax(val[pos] / T, dim=-1)
+        s_logp = torch.log_softmax(gathered / T, dim=-1)
+        kl = (t_logp.exp() * (t_logp - s_logp)).sum(-1).mean()
+        return (1.0 - beta) * ce + beta * (T * T) * kl
 
     for ep in range(args.epochs):
         tot_loss, n = 0.0, 0
-        for msgs, comp in train_rows:
-            loss = ce_on(msgs, comp)
+        for msgs, comp, kd in train_rows:
+            loss = ce_on(msgs, comp, kd, args.beta, args.kd_temp)
             if not torch.isfinite(loss):
                 print("non-finite loss; skipping row"); continue
             opt.zero_grad()
@@ -137,7 +171,7 @@ def main() -> int:
         line = f"epoch {ep+1}: train loss {tot_loss/max(n,1):.4f} over {n} rows"
         if eval_rows:
             with torch.no_grad():
-                ev = [ce_on(m, c).item() for m, c in eval_rows]
+                ev = [ce_on(m, c).item() for m, c, _ in eval_rows]
             ev = [v for v in ev if v == v]  # drop nan evals
             line += f"; eval loss {sum(ev)/max(len(ev),1):.4f} over {len(ev)} rows"
         print(line)
