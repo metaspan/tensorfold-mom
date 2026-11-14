@@ -148,16 +148,111 @@ def main() -> int:
         rows = rows[: args.limit]
     print(f"teacher: {args.teacher}\nrows: {len(rows)}", flush=True)
 
-    teacher = AutoModelForCausalLM.from_pretrained(
-        args.teacher, dtype=torch.bfloat16, trust_remote_code=False,
-        device_map="cuda:0" if torch.cuda.is_available() else None,
-        # GB10 unified-RAM: mmap'd shard pages (67 GB) are charged to the
-        # cgroup alongside pinned GPU weights and OOM-kill the load at ~97%.
-        # disable_mmap reads each shard fully into anon memory instead
-        # (~1.7 GB transient); page cache never accumulates.
-        disable_mmap=True)
-    teacher.eval()
+    # Peak-memory-safe load for GB10 unified-RAM (121 GB host == GPU).
+    # from_pretrained's MoE custom weight conversion holds the unfused
+    # checkpoint (67 GB) AND the fused destination simultaneously — sampler
+    # showed anon 104 GB before the system OOM killer fired. Bypass it:
+    #   1) build model from config on CPU (in-place init, 67 GB, no doubling)
+    #   2) move layer-by-layer to GPU, dropping each CPU copy as we go
+    #   3) copy checkpoint tensors in per-shard (1.6 GB transient; fadvise
+    #      wrapper above keeps page cache from accumulating)
+    # Combined peak ~70 GB. This is fully under our control: no HF loader
+    # transients.
+    from safetensors.torch import load_file as _st_load_file
+    from transformers import AutoConfig
+    import gc
+
+    cfg = AutoConfig.from_pretrained(args.teacher)
     dev = "cuda" if torch.cuda.is_available() else "cpu"
+    # Instantiate directly on the target device: a CPU-side model would sit
+    # at the 67 GB high-water mark even after layer .to(cuda), because
+    # torch's CPU caching allocator does not return freed blocks to the OS
+    # (measured: rss 51 GB mid-load with layers already on GPU -> system
+    # OOM on 121 GB unified). GPU-direct init keeps host RSS at ~shard size.
+    with torch.device(dev):
+        teacher = AutoModelForCausalLM.from_config(cfg, dtype=torch.bfloat16)
+    teacher.eval()
+
+    sd_model = dict(teacher.named_parameters())
+    # Fused-expert targets: transformers stores experts as
+    #   <...>layers.L.mlp.experts.gate_up_proj [E, 2I, H]  (rows [0:I]=gate,
+    #      [I:2I]=up — model chunks(2,-1) into gate,up)
+    #   <...>layers.L.mlp.experts.down_proj    [E, H, I]
+    # while the checkpoint stores per-expert tensors. Slice-copy each expert
+    # straight into the (GPU-resident) fused parameter: ~2 MB transient.
+    import re as _re
+    expert_params = {}  # L -> {"gate_up": Param, "down": Param}
+    for name, prm in sd_model.items():
+        m = _re.search(r"layers\.(\d+)\.mlp\.experts\.(gate_up_proj|down_proj)$",
+                       name)
+        if m:
+            L = int(m.group(1))
+            expert_params.setdefault(L, {})
+            expert_params[L]["gate_up" if m.group(2) == "gate_up_proj"
+                            else "down"] = prm
+    exp_key = _re.compile(
+        r"layers\.(\d+)\.mlp\.experts\.(\d+)\.(gate|up|down)_proj\.weight$")
+    ckpt_dir = args.teacher
+    shards = sorted(f for f in os.listdir(ckpt_dir) if f.endswith(".safetensors"))
+    loaded, missing = set(), []
+    with torch.no_grad():
+        for fn in shards:
+            sd = _st_load_file(os.path.join(ckpt_dir, fn))
+            for k, v in sd.items():
+                m = exp_key.search(k)
+                if m and expert_params:
+                    L, E, which = int(m.group(1)), int(m.group(2)), m.group(3)
+                    ep = expert_params.get(L)
+                    if ep is None:
+                        missing.append(k)
+                        continue
+                    if which in ("gate", "up"):
+                        I = v.shape[0]
+                        tgt = ep["gate_up"].data[E]
+                        off = 0 if which == "gate" else I
+                        tgt[off:off + I].copy_(v.to(tgt.device))
+                    else:
+                        ep["down"].data[E].copy_(v.to(ep["down"].device))
+                    loaded.add(k)
+                    continue
+                tgt = sd_model.get(k)
+                if tgt is None:
+                    # tolerate common prefix drift between ckpt and model
+                    for cand in (k.replace("model.language_model.", "model."),
+                                 "model." + k.split("model.", 1)[-1]
+                                 if "model." in k else k):
+                        tgt = sd_model.get(cand)
+                        if tgt is not None:
+                            break
+                if tgt is None:
+                    missing.append(k)
+                    continue
+                if tgt.shape != v.shape:
+                    raise RuntimeError(f"shape mismatch {k}: ckpt {v.shape} "
+                                       f"vs model {tuple(tgt.shape)}")
+                tgt.data.copy_(v.to(tgt.device), non_blocking=True)
+                loaded.add(k)
+            del sd
+            gc.collect()
+    print(f"copied {len(loaded)} tensors; unmapped: {len(missing)}",
+          flush=True)
+    # MTP head tensors (no MTP module in base class) and vision-tower tensors
+    # (text-only teacher forward) have no home and are unused — skip them;
+    # anything else unmapped is fatal.
+    def _skip(k):
+        return k.startswith("mtp.") or k.startswith("model.visual.") or \
+            k.startswith("visual.")
+    skipped = [k for k in missing if _skip(k)]
+    non_mtp = [k for k in missing if not _skip(k)]
+    print(f"skipped mtp.*/visual tensors: {len(skipped)}", flush=True)
+    if non_mtp:
+        print("first unmapped keys:", non_mtp[:8], flush=True)
+        raise RuntimeError("unmapped checkpoint keys — extend mapping")
+    if dev == "cuda":
+        for b in teacher.buffers():
+            if b.device.type == "cpu" and b.numel() < 4_000_000:
+                b.data = b.data.to("cuda")
+    teacher.eval()
 
     out = []
     with torch.no_grad():
