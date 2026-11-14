@@ -74,7 +74,12 @@ distillation recipe (BL-12). All numbers below are measured on the DGX Spark
 - 4.9× data moved the loss curve but produced **zero gate movement**.
 - Failure analysis: t3's misses are **knowledge** failures, not format
   failures — 23+19→"22", 6×7→"60", 10 km→"10.21 mi", 1.5 h→"2.5 minutes",
-  "reverse 'world'" → rambles. The 0.8B parent answers all 12 correctly.
+  "reverse 'world'" → rambles. **Correction 2026-11-14 (review follow-up):** the
+  "parent answers all 12 correctly" line was an overclaim from spot-checks during
+  the t1 parent-control episode, not a scored 12-item run. A scored teacher-gate
+  run on the dequantised bf16 teacher is queued (doubles as KD teacher calibration
+  per both reviewers' ask); until it lands, treat teacher correctness on the gate
+  items as spot-verified only.
 - Conclusion: teacher-rollout sampling on the trivial lane teaches the
   student the teacher's **shape, not its answers**. Shape-learning saturates
   fast (t2 already plateaued on eval loss); correctness needs a signal that

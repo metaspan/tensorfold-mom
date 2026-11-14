@@ -9,7 +9,9 @@ memory (each pass fits RAM alone).
 
 Teacher: official Qwen/Qwen3.6-35B-A3B-FP8 in the HF cache — the same base
 the on-disk NVFP4 collector teacher was quantized from (config identity
-verified: qwen3_5_moe_text, hidden 2048, 40 layers, 256 experts).
+verified: qwen3_5_moe_text, hidden 2048, 40 layers, 256 experts). The HF
+finegrained-fp8 triton path fails on this stack, so the default is the bf16
+dequantized copy of the identical snapshot (dequant_fp8_teacher.py).
 
 Tokenization is deliberately duplicated VERBATIM from distill_train.ce_on so
 positions align 1:1 (the trainer slices with its own p_len; we save full T).
@@ -130,45 +132,28 @@ TEACHER_GLOB = os.path.expanduser(
     "~/.cache/huggingface/hub/models--Qwen--Qwen3.6-35B-A3B-FP8/snapshots/*")
 
 
-def main() -> int:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--data", required=True)
-    ap.add_argument("--out", required=True)
-    ap.add_argument("--topk", type=int, default=8)
-    ap.add_argument("--max-len", type=int, default=512)
-    ap.add_argument("--teacher", default=None)
-    ap.add_argument("--limit", type=int, default=0)
-    args = ap.parse_args()
-    if args.teacher is None:
-        args.teacher = sorted(glob.glob(TEACHER_GLOB))[-1]
-
-    tok = AutoTokenizer.from_pretrained(STUDENT)
-    rows = load_rows(args.data)
-    if args.limit:
-        rows = rows[: args.limit]
-    print(f"teacher: {args.teacher}\nrows: {len(rows)}", flush=True)
-
-    # Peak-memory-safe load for GB10 unified-RAM (121 GB host == GPU).
-    # from_pretrained's MoE custom weight conversion holds the unfused
-    # checkpoint (67 GB) AND the fused destination simultaneously — sampler
-    # showed anon 104 GB before the system OOM killer fired. Bypass it:
-    #   1) build model from config on CPU (in-place init, 67 GB, no doubling)
-    #   2) move layer-by-layer to GPU, dropping each CPU copy as we go
-    #   3) copy checkpoint tensors in per-shard (1.6 GB transient; fadvise
-    #      wrapper above keeps page cache from accumulating)
-    # Combined peak ~70 GB. This is fully under our control: no HF loader
-    # transients.
+def build_teacher(teacher_dir: str):
+    """Peak-memory-safe load for GB10 unified-RAM (121 GB host == GPU).
+    from_pretrained's MoE custom weight conversion holds the unfused
+    checkpoint (67 GB) AND the fused destination simultaneously — sampler
+    showed anon 104 GB before the system OOM killer fired. Bypass it:
+      1) instantiate from config directly on the target device (a CPU-side
+         model would sit at the 67 GB high-water mark even after layer
+         .to(cuda) — torch's CPU caching allocator does not return freed
+         blocks to the OS; measured rss 51 GB mid-load -> system OOM)
+      2) copy checkpoint tensors in per-shard (1.6 GB transient; fadvise
+         wrapper above keeps page cache from accumulating)
+      3) per-expert checkpoint tensors slice-copy into the fused GPU params
+         (gate_up_proj rows [0:I]=gate,[I:2I]=up; down_proj direct)
+    Combined peak ~70 GB. Fully under our control: no HF loader transients.
+    Shared with teacher_gate.py."""
     from safetensors.torch import load_file as _st_load_file
     from transformers import AutoConfig
+    import re as _re
     import gc
 
-    cfg = AutoConfig.from_pretrained(args.teacher)
+    cfg = AutoConfig.from_pretrained(teacher_dir)
     dev = "cuda" if torch.cuda.is_available() else "cpu"
-    # Instantiate directly on the target device: a CPU-side model would sit
-    # at the 67 GB high-water mark even after layer .to(cuda), because
-    # torch's CPU caching allocator does not return freed blocks to the OS
-    # (measured: rss 51 GB mid-load with layers already on GPU -> system
-    # OOM on 121 GB unified). GPU-direct init keeps host RSS at ~shard size.
     with torch.device(dev):
         teacher = AutoModelForCausalLM.from_config(cfg, dtype=torch.bfloat16)
     teacher.eval()
@@ -180,7 +165,6 @@ def main() -> int:
     #   <...>layers.L.mlp.experts.down_proj    [E, H, I]
     # while the checkpoint stores per-expert tensors. Slice-copy each expert
     # straight into the (GPU-resident) fused parameter: ~2 MB transient.
-    import re as _re
     expert_params = {}  # L -> {"gate_up": Param, "down": Param}
     for name, prm in sd_model.items():
         m = _re.search(r"layers\.(\d+)\.mlp\.experts\.(gate_up_proj|down_proj)$",
@@ -192,7 +176,7 @@ def main() -> int:
                             else "down"] = prm
     exp_key = _re.compile(
         r"layers\.(\d+)\.mlp\.experts\.(\d+)\.(gate|up|down)_proj\.weight$")
-    ckpt_dir = args.teacher
+    ckpt_dir = teacher_dir
     shards = sorted(f for f in os.listdir(ckpt_dir) if f.endswith(".safetensors"))
     loaded, missing = set(), []
     with torch.no_grad():
@@ -253,6 +237,28 @@ def main() -> int:
             if b.device.type == "cpu" and b.numel() < 4_000_000:
                 b.data = b.data.to("cuda")
     teacher.eval()
+    return teacher, dev
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--data", required=True)
+    ap.add_argument("--out", required=True)
+    ap.add_argument("--topk", type=int, default=8)
+    ap.add_argument("--max-len", type=int, default=512)
+    ap.add_argument("--teacher", default=None)
+    ap.add_argument("--limit", type=int, default=0)
+    args = ap.parse_args()
+    if args.teacher is None:
+        args.teacher = sorted(glob.glob(TEACHER_GLOB))[-1]
+
+    tok = AutoTokenizer.from_pretrained(STUDENT)
+    rows = load_rows(args.data)
+    if args.limit:
+        rows = rows[: args.limit]
+    print(f"teacher: {args.teacher}\nrows: {len(rows)}", flush=True)
+
+    teacher, dev = build_teacher(args.teacher)
 
     out = []
     with torch.no_grad():
