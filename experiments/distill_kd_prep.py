@@ -28,6 +28,98 @@ import json
 import os
 import sys
 
+# --- page-cache discipline BEFORE transformers/safetensors import ------------
+# GB10 is unified-RAM: the 67 GB of mmap'd shard pages from the device_map
+# load are charged to the cgroup ALONGSIDE the 67 GB of (pinned) GPU weights,
+# and the cgroup OOM-killer fires near full weight materialization. Wrap
+# safetensors readers to posix_fadvise(DONTNEED) each shard after it is fully
+# read so clean file pages leave the cgroup immediately. transformers binds
+# `safe_open` via from-import at its own import time, so this patch must be
+# installed first.
+import safetensors
+import safetensors.torch
+
+_orig_safe_open = safetensors.safe_open
+
+
+def _fadvise_dontneed(path):
+    try:
+        fd = os.open(path, os.O_RDONLY)
+        try:
+            os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
+        finally:
+            os.close(fd)
+    except OSError:
+        pass
+
+
+class _FadviseSafeOpen:
+    def __init__(self, filename, framework="pt", device="cpu", **kw):
+        self._path = str(filename)
+        self._cm = _orig_safe_open(filename, framework=framework,
+                                   device=device, **kw)
+        self._keys = list(self._cm.keys())
+        self._read = set()
+        try:
+            self._fd = os.open(self._path, os.O_RDONLY)
+        except OSError:
+            self._fd = None
+
+    def _evict_after(self, key):
+        # shard files are read in weight_map order: once we hand out the last
+        # tensor of a shard, all its pages are read-once garbage
+        self._read.add(key)
+        if self._fd is not None and set(self._keys) <= self._read:
+            try:
+                os.posix_fadvise(self._fd, 0, 0, os.POSIX_FADV_DONTNEED)
+            except OSError:
+                pass
+
+    def get_tensor(self, key):
+        t = self._cm.get_tensor(key)
+        self._evict_after(key)
+        return t
+
+    def get_slice(self, key):
+        # lazy slice: eviction cannot track reads through it; pre-evicting is
+        # unsafe, so just track (behavior identical to unpatched)
+        return self._cm.get_slice(key)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        r = self._cm.__exit__(*a)
+        if self._fd is not None:
+            try:
+                os.posix_fadvise(self._fd, 0, 0, os.POSIX_FADV_DONTNEED)
+            except OSError:
+                pass
+            try:
+                os.close(self._fd)
+            except OSError:
+                pass
+            self._fd = None
+        return r
+
+    def __getattr__(self, n):
+        return getattr(self._cm, n)
+
+
+safetensors.safe_open = _FadviseSafeOpen
+
+_orig_load_file = safetensors.torch.load_file
+
+
+def _load_file_fadvise(path, *a, **k):
+    d = _orig_load_file(path, *a, **k)
+    _fadvise_dontneed(str(path))
+    return d
+
+
+safetensors.torch.load_file = _load_file_fadvise
+# -----------------------------------------------------------------------------
+
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -57,7 +149,13 @@ def main() -> int:
     print(f"teacher: {args.teacher}\nrows: {len(rows)}", flush=True)
 
     teacher = AutoModelForCausalLM.from_pretrained(
-        args.teacher, torch_dtype=torch.bfloat16, trust_remote_code=False)
+        args.teacher, dtype=torch.bfloat16, trust_remote_code=False,
+        device_map="cuda:0" if torch.cuda.is_available() else None,
+        # GB10 unified-RAM: mmap'd shard pages (67 GB) are charged to the
+        # cgroup alongside pinned GPU weights and OOM-kill the load at ~97%.
+        # disable_mmap reads each shard fully into anon memory instead
+        # (~1.7 GB transient); page cache never accumulates.
+        disable_mmap=True)
     teacher.eval()
     dev = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -72,7 +170,6 @@ def main() -> int:
                       max_length=args.max_len)
             input_ids = enc["input_ids"]
             n = input_ids.shape[1]
-            teacher.to(dev)
             logits = teacher(input_ids=input_ids.to(dev)).logits[0]  # [n, V]
             # position t logits predict token t+1; keep n rows, trainer aligns
             k = min(args.topk, logits.shape[-1])
@@ -81,12 +178,8 @@ def main() -> int:
                         "val": vals.to(torch.bfloat16).cpu(), "len": n})
             if i == 0:
                 print("first row ok:", idxs.shape, flush=True)
-            if (i + 1) % 200 == 0:
-                teacher.to("cpu")
-                torch.cuda.empty_cache()
+            if (i + 1) % 500 == 0:
                 print(f"row {i+1}/{len(rows)}", flush=True)
-                teacher.to(dev)
-        teacher.to("cpu")
     torch.save(out, args.out)
     print(f"wrote {len(out)} rows -> {args.out}")
     return 0
