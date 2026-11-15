@@ -28,7 +28,7 @@ import sys
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-STUDENT = "/home/derek/models/tensorfold-mom/qwen36-nested-16l-bf16"  # materialized (nested_materialize.py): names fused, NVFP4 dequantized
+STUDENT = os.environ.get("MOM_STUDENT", "/home/derek/models/tensorfold-mom/qwen36-nested-16l-bf16")  # materialized (nested_materialize.py): names fused, NVFP4 dequantized
 FROZEN_LAYERS = 10  # layers 0..9 frozen (matches nested_extract default)
 
 

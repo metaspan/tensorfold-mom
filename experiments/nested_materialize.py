@@ -23,8 +23,8 @@ from safetensors import safe_open
 from safetensors.torch import save_file
 from transformers import AutoConfig, AutoModelForCausalLM
 
-STUDENT = "/home/derek/models/tensorfold-mom/qwen36-nested-16l"
-OUT = "/home/derek/models/tensorfold-mom/qwen36-nested-16l-bf16"
+STUDENT = os.environ.get("MOM_STUDENT", "/home/derek/models/tensorfold-mom/qwen36-nested-16l")
+OUT = os.environ.get("MOM_OUT", "/home/derek/models/tensorfold-mom/qwen36-nested-16l-bf16")
 E2M1 = torch.tensor([0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0], dtype=torch.float32)
 EXPERT_RE = re.compile(
     r"^model\.language_model\.layers\.(\d+)\.mlp\.experts\.(\d+)\.(gate|up|down)_proj\.weight$")
