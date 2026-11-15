@@ -340,6 +340,9 @@ pub fn saveCache(e: *Engine, cache: *Cache, at: usize, seen: []const Seen, devic
     var off: usize = 0;
     for (0..l.count()) |i| {
         const p = l.piece(i);
+        if (std.c.getenv("TF_MOM_ADOPT_DUMP") != null and i == 0) { // BL-29: name the save's addressing
+            std.log.warn("qwen3_5: save piece0: stateBytes={d} piece.len={d} copy.len={d} deltas={d} at={d} state.ptr={x} state.len={d} cap={d}", .{ e.g.stateBytes(), p.len, len, e.g.deltas(), at, cache.state.ptr, cache.state.len, cache.cap });
+        }
         if (i == 1 and wholePages(cache, l)) {
             try pageCopies(e, cache, l, copy, off, .save);
             break;
@@ -355,6 +358,59 @@ pub fn saveCache(e: *Engine, cache: *Cache, at: usize, seen: []const Seen, devic
         off += p.len;
     }
     try e.stream.synchronize();
+    if (std.c.getenv("TF_MOM_ADOPT_DUMP") != null) { // BL-29: parent source and copy at save time, capped at 32 MiB of state
+        const want = @min(e.g.stateBytes(), 33554432);
+        const buf = try e.gpa.alloc(u8, want);
+        defer e.gpa.free(buf);
+        try e.d.check(e.d.api.cuMemcpyDtoHAsync_v2(@ptrCast(buf.ptr), cache.state.ptr, want, e.stream.handle), "cuMemcpyDtoHAsync");
+        _ = e.stream.synchronize() catch {};
+        {
+            var pb: [80:0]u8 = undefined;
+            const wrote = std.fmt.bufPrint(&pb, "/tmp/tf_mom_parentsrc_{s}_{d}.bin", .{ if (dev != null) "dev" else "host", at }) catch pb[0..0];
+            if (wrote.len != 0) {
+                const fd = std.c.open(&pb, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, @as(std.c.mode_t, 0o644));
+                if (fd != -1) {
+                    _ = std.c.write(fd, buf.ptr, want);
+                    _ = std.c.close(fd);
+                }
+            }
+        }
+        var cbuf: []u8 = buf[0..0];
+        var cbuf_owned = false;
+        defer if (cbuf_owned) e.gpa.free(cbuf);
+        if (dev) |b| {
+            const t = try e.gpa.alloc(u8, want);
+            cbuf = t;
+            cbuf_owned = true;
+            try e.d.check(e.d.api.cuMemcpyDtoHAsync_v2(@ptrCast(t.ptr), b.ptr, want, e.stream.handle), "cuMemcpyDtoHAsync");
+            _ = e.stream.synchronize() catch {};
+        } else {
+            cbuf = buf;
+            cbuf_owned = false;
+            const host_view = copy.host.bytes[0..@min(want, copy.host.bytes.len)];
+            const fdh = blk: {
+                var pbh: [80:0]u8 = undefined;
+                const w2 = std.fmt.bufPrint(&pbh, "/tmp/tf_mom_copysave_host_{d}.bin", .{at}) catch pbh[0..0];
+                _ = w2;
+                break :blk std.c.open(&pbh, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, @as(std.c.mode_t, 0o644));
+            };
+            if (fdh != -1) {
+                _ = std.c.write(fdh, host_view.ptr, host_view.len);
+                _ = std.c.close(fdh);
+            }
+        }
+        if (dev != null) {
+            var pb2: [80:0]u8 = undefined;
+            const wrote2 = std.fmt.bufPrint(&pb2, "/tmp/tf_mom_copysave_dev_{d}.bin", .{at}) catch pb2[0..0];
+            if (wrote2.len != 0) {
+                const fd2 = std.c.open(&pb2, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, @as(std.c.mode_t, 0o644));
+                if (fd2 != -1) {
+                    _ = std.c.write(fd2, cbuf.ptr, cbuf.len);
+                    _ = std.c.close(fd2);
+                }
+            }
+        }
+    }
     return copy;
 }
 
@@ -484,7 +540,11 @@ pub const AdoptMap = struct {
         for (1..nl.count()) |i| {
             const np = nl.piece(i);
             w.appendAssumeCapacity(.{ .src = off, .len = np.len, .piece = i });
-            off += pl.piece(i).len; // same format/at/heads: parent's piece i has the same length
+            // MoM BL-29: stride the copy in PARENT piece sizes. The loop index is a nested
+            // piece index; when the nested engine drops a piece the parent keeps (a linear
+            // layer over the nested's `layers` cap), nested piece i no longer sits at parent
+            // piece i in the copy -- the packed offset must follow the parent's packing.
+            off += pl.piece(i).len;
         }
         return .{ .writes = w.items, .at = at };
     }
@@ -532,31 +592,79 @@ pub fn adoptCache(ne: *Engine, cache: *Cache, copy: *Copy, m: *const AdoptMap, s
     // stale recurrence; a tail tap past the window). The nested resume DOES read them and the
     // logits go NaN. Zeroing non-finite state values restores the bytes a fresh nested buffer
     // holds -- the values the thin engine would have produced itself.
-    if (std.c.getenv("TF_MOM_ADOPT_SANITIZE") != null and copy.dev == null) {
+    // MoM BL-29: this ran only for env-gated HOST copies. Production default is device-backed
+    // (GB10 integrated), so it never once ran there: the first cold device adoption decoded
+    // NonfiniteQwenLogits (verified: dozens of non-finite rec f32 per delta region, KV clean).
+    // Now unconditional on both paths. For a device copy the state block is staged to the host,
+    // sanitized, and written back — the subsequent piece-0 copy then lands sanitized bytes, and
+    // host audit/verify compare against the same sanitized buffer (no phantom "DIFFERS").
+    {
         const recb = ne.g.recBytes();
         const convb = ne.g.convBytes();
-        const region = recb + convb;
-        const base: [*]u8 = @ptrCast(copy.host.bytes.ptr + m.writes[0].src);
+        const state_bytes = ne.g.deltas() * (recb + convb);
         var zr: usize = 0;
         var zc: usize = 0;
+        var staged: ?[]f32 = null;
+        defer if (staged) |b| ne.gpa.free(b);
+        const base: [*]u8 = if (copy.dev) |b| blk: {
+            const buf = try ne.gpa.alloc(f32, @divExact(state_bytes, 4)); // f32 element: align 4 for the casts below
+            staged = buf;
+            try ne.d.check(ne.d.api.cuMemcpyDtoHAsync_v2(@ptrCast(buf.ptr), b.ptr + m.writes[0].src, state_bytes, ne.stream.handle), "cuMemcpyDtoHAsync");
+            _ = ne.stream.synchronize() catch {};
+            break :blk @ptrCast(buf.ptr);
+        } else copy.host.bytes.ptr + m.writes[0].src;
+        if (std.c.getenv("TF_MOM_ADOPT_DUMP") != null) { // BL-29: byte-compare the state block device vs host copy, PRE-sanitize, keyed by mode+at
+            var pathbuf: [80:0]u8 = undefined;
+            const wrote = std.fmt.bufPrint(&pathbuf, "/tmp/tf_mom_statedump_{s}_{d}.bin", .{ if (copy.dev != null) "dev" else "host", m.at }) catch pathbuf[0..0];
+            if (wrote.len != 0) {
+                const fd = std.c.open(&pathbuf, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, @as(std.c.mode_t, 0o644));
+                if (fd != -1) {
+                    _ = std.c.write(fd, base, state_bytes);
+                    _ = std.c.close(fd);
+                    std.log.warn("qwen3_5: adopt dump: {d} bytes state block (at {d}) to {s}", .{ state_bytes, m.at, wrote });
+                }
+            }
+        }
+        // MoM BL-29: cache.state is PLANES (cuda_cache.zig's Seg view: rec = state.ptr,
+        // conv = state.ptr + deltas*recBytes), not interleaved [rec|conv] regions. The first
+        // version of this scan used region = recBytes+convBytes strides and so sanitized
+        // bytes no kernel ever reads while leaving the real conv planes untouched.
+        const conv_base = ne.g.deltas() * recb;
+        const zero_conv = std.c.getenv("TF_MOM_ADOPT_ZERO_CONV") != null; // BL-29 bisection
+        const zero_rec = std.c.getenv("TF_MOM_ADOPT_ZERO_REC") != null; // BL-29 bisection
+        const rec_from: usize = if (std.c.getenv("TF_MOM_ADOPT_ZERO_REC_FROM")) |p| std.fmt.parseInt(usize, std.mem.span(p), 10) catch ne.g.deltas() else ne.g.deltas();
+        const conv_from: usize = if (std.c.getenv("TF_MOM_ADOPT_ZERO_CONV_FROM")) |p| std.fmt.parseInt(usize, std.mem.span(p), 10) catch ne.g.deltas() else ne.g.deltas();
         var d: usize = 0;
         while (d < ne.g.deltas()) : (d += 1) {
-            const rec = @as([*]f32, @ptrCast(@alignCast(base + d * region)))[0 .. recb / 4];
+            if (zero_rec or d >= rec_from) @memset(base[d * recb .. (d + 1) * recb], 0); // BL-29 bisection (rec planes)
+            if (zero_conv or d >= conv_from) @memset(base[conv_base + d * convb .. conv_base + (d + 1) * convb], 0); // BL-29 bisection (conv planes)
+            const rec = @as([*]f32, @ptrCast(@alignCast(base + d * recb)))[0 .. recb / 4];
             for (rec) |*v| {
                 if (!std.math.isFinite(v.*)) {
                     v.* = 0;
                     zr += 1;
                 }
             }
-            const conv = @as([*]u16, @ptrCast(@alignCast(base + d * region + recb)))[0 .. convb / 2];
+            const conv = @as([*]u16, @ptrCast(@alignCast(base + conv_base + d * convb)))[0 .. convb / 2];
             for (conv) |*v| {
-                if ((v.* & 0x7F80) == 0x7F80 and (v.* & 0x007F) != 0) {
+                if ((v.* & 0x7F80) == 0x7F80) { // BL-29: the old filter required a nonzero mantissa, letting bf16 inf through
                     v.* = 0;
                     zc += 1;
                 }
             }
         }
-        std.log.warn("qwen3_5: adopt sanitize: zeroed {d} rec f32 and {d} conv bf16 non-finite(s)", .{ zr, zc });
+        if (staged) |buf| { // write the sanitized state back so the device copy matches the host one
+            const zero_state = std.c.getenv("TF_MOM_ADOPT_ZERO_STATE") != null; // BL-29 bisection: nuke the whole state block
+            const zero_arm = zero_state or zero_conv or zero_rec or rec_from < ne.g.deltas() or conv_from < ne.g.deltas();
+            if (zero_state) @memset(buf, 0);
+            if (zr != 0 or zc != 0 or zero_arm) {
+                const b = copy.dev.?;
+                try ne.d.check(ne.d.api.cuMemcpyHtoDAsync_v2(b.ptr + m.writes[0].src, @ptrCast(buf.ptr), state_bytes, ne.stream.handle), "cuMemcpyHtoDAsync");
+            }
+        } else if (std.c.getenv("TF_MOM_ADOPT_ZERO_STATE") != null) {
+            @memset(base[0..state_bytes], 0);
+        }
+        if (zr != 0 or zc != 0) std.log.warn("qwen3_5: adopt sanitize: zeroed {d} rec f32 and {d} conv bf16 non-finite(s)", .{ zr, zc });
     }
     // the state block, piece by piece (never paged)
     {
@@ -693,14 +801,25 @@ fn sharedAudit(e: *Engine, cache: *const Cache, copy: *Copy, m: *const AdoptMap,
 /// device buffers the engine will actually read. A mismatch names the piece and offset;
 /// an ok verdict moves the fault to what the engine reads (slot, not store).
 fn adoptVerify(ne: *Engine, cache: *const Cache, copy: *Copy, m: *const AdoptMap) void {
-    if (copy.dev != null) { // host-pointer compare only; phase B sets TF_MOM_ADOPT_HOST
-        std.log.warn("qwen3_5: adopt verify: skipped (device-backed copy; set TF_MOM_ADOPT_HOST)", .{});
-        return;
-    }
     copy.reading = true; // parent copy must not be recycled mid-verify
     defer copy.reading = false;
     const l: Layout = .{ .g = ne.g, .format = copy.format, .cap = cache.cap, .at = m.at };
     const a = ne.gpa;
+    // MoM BL-29: a device-backed copy is verified too -- both sides are read back to the
+    // host and compared. The old skip ("set TF_MOM_ADOPT_HOST") left the production
+    // default path (GB10 integrated saves) with zero byte visibility, and BL-29 lived there.
+    var copy_host: ?[]u8 = null;
+    defer if (copy_host) |b| a.free(b);
+    const src_base: ?[*]const u8 = if (copy.dev) |b| blk: {
+        const buf = a.alloc(u8, copy.len) catch return;
+        copy_host = buf;
+        if (ne.d.api.cuMemcpyDtoHAsync_v2(@ptrCast(buf.ptr), b.ptr, copy.len, ne.stream.handle) != 0) {
+            std.log.warn("qwen3_5: adopt verify: copy DtoH failed", .{});
+            return;
+        }
+        break :blk buf.ptr;
+    } else copy.host.bytes.ptr;
+    const src_p = src_base.?;
     var ok_pieces: usize = 0;
     const n_pieces = l.count();
     var i: usize = 0;
@@ -718,7 +837,7 @@ fn adoptVerify(ne: *Engine, cache: *const Cache, copy: *Copy, m: *const AdoptMap
             }
         }
         _ = ne.stream.synchronize() catch {};
-        const src: [*]const u8 = if (copy.dev) |b| @ptrFromInt(b.ptr + m.writes[i].src) else @ptrCast(copy.host.bytes.ptr + m.writes[i].src);
+        const src: [*]const u8 = src_p + m.writes[i].src;
         var k: usize = 0;
         while (k < p.len and buf[k] == src[k]) : (k += 1) {}
         if (k == p.len) ok_pieces += 1 else {
@@ -741,7 +860,7 @@ fn adoptVerify(ne: *Engine, cache: *const Cache, copy: *Copy, m: *const AdoptMap
     var first_where: [128]u8 = undefined;
     var first_len: usize = 0;
     var region_bad = std.mem.zeroes([64]usize); // per-region nonfinite counts (state block)
-    const base_src: [*]const u8 = @ptrCast(copy.host.bytes.ptr);
+    const base_src: [*]const u8 = if (copy_host) |b| b.ptr else copy.host.bytes.ptr; // device copies: the staged DtoH buffer (BL-29: the old read of an empty host buffer segfaulted)
     {
         const recb = ne.g.recBytes();
         const convb = ne.g.convBytes();

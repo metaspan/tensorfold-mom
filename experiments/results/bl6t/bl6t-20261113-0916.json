@@ -1,0 +1,42 @@
+{
+ "scenario": "D_tuned",
+ "boot": {
+  "parallel": 4,
+  "context": 8192,
+  "env": {
+   "TF_QWEN_KV_PAGES": "64",
+   "TF_QWEN_KV_PAGES_ALL": "1",
+   "TF_MOM_TRIVIAL_PRIORITY": "1"
+  }
+ },
+ "rows": [
+  {
+   "variant": 0,
+   "ttft_s": 0.1151,
+   "decode_s": 0.679,
+   "tokens": 96,
+   "tok_s": 141.4
+  },
+  {
+   "variant": 1,
+   "ttft_s": 0.1146,
+   "decode_s": 0.6801,
+   "tokens": 96,
+   "tok_s": 141.2
+  },
+  {
+   "variant": 2,
+   "ttft_s": 0.1176,
+   "decode_s": 0.6781,
+   "tokens": 96,
+   "tok_s": 141.6
+  }
+ ],
+ "mean_tok_s": 141.4,
+ "min_tok_s": 141.2,
+ "bars": {
+  "mean": 154.0,
+  "guard": 138.0
+ },
+ "verdict": "NO-GO"
+}
