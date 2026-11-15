@@ -272,7 +272,7 @@ pub fn parseSpecs(a: std.mem.Allocator, argv: []const []const u8, problem: *[]co
         return null;
     }
     // ids must be distinct: the router's decision table and /v1/models both key on them
-    for (specs.items, 0..) |x, xi| for (specs.items[xi + 1..]) |y| {
+    for (specs.items, 0..) |x, xi| for (specs.items[xi + 1 ..]) |y| {
         if (std.mem.eql(u8, x.name, y.name)) {
             problem.* = try std.fmt.allocPrint(a, "mom-serve: two models share the name {s}", .{x.name});
             return null;
@@ -366,11 +366,11 @@ pub fn run(init: std.process.Init, argv: []const []const u8) !u8 {
         with_pos[0] = parsed.specs[0].model;
         @memcpy(with_pos[1..], parsed.rest);
         break :blk cli.parse(a, with_pos, &u) catch |e| switch (e) {
-        error.Usage => {
-            std.debug.print("usage: tensorfold-native mom-serve [serve flags] --model DIR --name NAME [--lane L] [--pin] ...\ntensorfold mom-serve: error: {s}\n", .{u.message});
-            return 2;
-        },
-        else => |x| return x,
+            error.Usage => {
+                std.debug.print("usage: tensorfold-native mom-serve [serve flags] --model DIR --name NAME [--lane L] [--pin] ...\ntensorfold mom-serve: error: {s}\n", .{u.message});
+                return 2;
+            },
+            else => |x| return x,
         };
     };
     if (args.name.len == 0) args.name = parsed.specs[0].name; // /v1/models shows --name, not the dir basename
@@ -622,7 +622,10 @@ pub fn run(init: std.process.Init, argv: []const []const u8) !u8 {
         .mom = reg,
         .model_type = held[0].model_type,
         .sampling = try @import("family_sampling.zig").resolve(a, held[0].model_type, null, .{
-            .temperature = args.temperature, .top_p = args.top_p, .top_k = args.top_k, .min_p = args.min_p,
+            .temperature = args.temperature,
+            .top_p = args.top_p,
+            .top_k = args.top_k,
+            .min_p = args.min_p,
         }),
         .environ = init.environ_map,
         .started = entry,
@@ -639,10 +642,10 @@ test "parseSpecs takes the mom groups and hands everything else to cli.parse" {
     const a = arena.allocator();
     var problem: []const u8 = "";
     const argv = [_][]const u8{
-        "--host", "127.0.0.1", "--port", "8123", "--parallel", "8",
-        "--model", "/models/small", "--name", "qwen3.5-2b", "--lane", "trivial", "--pin",
-        "--model", "/models/big", "--name", "qwen3.6-35b",
-        "--context", "32768", "--drafter", "/models/draft",
+        "--host",  "127.0.0.1",     "--port",        "8123",       "--parallel",  "8",
+        "--model", "/models/small", "--name",        "qwen3.5-2b", "--lane",      "trivial",
+        "--pin",   "--model",       "/models/big",   "--name",     "qwen3.6-35b", "--context",
+        "32768",   "--drafter",     "/models/draft",
     };
     const p = (try parseSpecs(a, &argv, &problem)).?;
     try std.testing.expectEqual(@as(usize, 2), p.specs.len);
@@ -677,7 +680,7 @@ test "priorityIndex picks the explicit trivial, else the lightest, else none" {
     };
     try std.testing.expectEqual(@as(?usize, 1), priorityIndex(&unlabeled, &.{ 900, 100 }));
     try std.testing.expectEqual(@as(?usize, 0), priorityIndex(&unlabeled, &.{ 100, 900 }));
-    try std.testing.expectEqual(@as(?usize, null), priorityIndex(unlabeled[0..1], &.{ 100 })); // one lane: nothing to preempt
+    try std.testing.expectEqual(@as(?usize, null), priorityIndex(unlabeled[0..1], &.{100})); // one lane: nothing to preempt
     try std.testing.expectEqual(@as(?usize, null), priorityIndex(&unlabeled, &.{ 500, 500 })); // tie: no clear trivial
 }
 

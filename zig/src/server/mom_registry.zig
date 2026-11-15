@@ -121,7 +121,11 @@ pub const Registry = struct {
 
     pub fn laneRoleName(self: *const Registry, li: usize) []const u8 {
         const role: mom_router.Role = if (li < self.router.cfg.lanes.len) self.router.cfg.lanes[li].role else .other;
-        return switch (role) { .trivial => "trivial", .default_lane => "default", .other => "other" };
+        return switch (role) {
+            .trivial => "trivial",
+            .default_lane => "default",
+            .other => "other",
+        };
     }
 
     pub fn decisionLatency(self: *const Registry) struct { total_ns: u64, max_ns: u64, n: u64 } {
@@ -252,7 +256,6 @@ fn fnvUpdate(h: *u64, bytes: []const u8) void {
 
 // ─── host tests ───────────────────────────────────────────────────────────────
 
-
 test "registry: lastUserText takes the last user string, multimodal parts joined" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -319,7 +322,9 @@ test "registry: wake-on-route reopens an asleep lane and leases it" {
         .lifecycles = lifes,
         .reopen = .{ .ctx = @ptrCast(&ctx), .call = struct {
             fn f(c: *anyopaque, al: std.mem.Allocator, io: std.Io, lane: usize) anyerror!void {
-                _ = al; _ = io; _ = lane;
+                _ = al;
+                _ = io;
+                _ = lane;
                 const t: *Ctx = @ptrCast(@alignCast(c));
                 if (t.fail) return error.OutOfMemory;
                 t.opens += 1;
