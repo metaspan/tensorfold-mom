@@ -64,7 +64,7 @@ def main() -> int:
         ids = tok(prompt, return_tensors="pt").to(dev)
         n_in = ids["input_ids"].shape[1]
         with torch.no_grad():
-            out = teacher.generate(**ids, max_new_tokens=48, do_sample=False,
+            out = teacher.generate(**ids, max_new_tokens=128, do_sample=False,
                                    pad_token_id=tok.eos_token_id)
         got = tok.decode(out[0][n_in:], skip_special_tokens=True)
         ok = (any(norm(a) in norm(got) for a in item["a"])
