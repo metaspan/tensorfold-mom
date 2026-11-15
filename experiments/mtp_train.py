@@ -68,6 +68,52 @@ class MTPHead(torch.nn.Module):
         self.register_buffer("cos", rotary[0], persistent=False)
         self.register_buffer("sin", rotary[1], persistent=False)
 
+    def _moe(self, xn, reference=False):
+        """MoE FFN (engine semantics: gate rows before up rows, softmax over
+        top-k logits, sigmoid(shared_gate) applied outside). Grouped-kernel
+        fast path (torch._grouped_mm); reference=True runs the per-expert
+        slice loop the fast path must reproduce (boot parity check)."""
+        B, T, _ = xn.shape
+        rl = xn @ self.gate.T                                   # B,T,E
+        w, idx = rl.topk(TOPK, -1)
+        w = F.softmax(w, -1)
+        x_flat = xn.reshape(-1, H)
+        N = x_flat.shape[0]
+        flat_e = idx.reshape(-1)                                # N*TOPK expert ids
+        tok_idx = torch.arange(N, device=xn.device).repeat_interleave(TOPK)
+        sort_e, order = flat_e.sort()
+        tok_sorted = tok_idx[order]
+        perm_x = x_flat[tok_sorted]
+        counts = torch.bincount(sort_e, minlength=E)
+        if reference:
+            out_slots = torch.zeros_like(perm_x)
+            ends = counts.cumsum(0).tolist()
+            start = 0
+            for e in range(E):
+                end = ends[e]
+                if end > start:
+                    xm = perm_x[start:end]
+                    g = xm @ self.gup[e, :EI].T
+                    u = xm @ self.gup[e, EI:].T
+                    out_slots[start:end] = (F.silu(g) * u) @ self.down[e].T
+                    start = end
+        else:
+            # Grouped kernel runs bf16 (engine computes experts in bf16); the
+            # .to(bf16) casts keep the trainable params fp32 — autograd routes
+            # gradients back through the cast nodes.
+            offs = counts.cumsum(0).to(torch.int32)
+            gu = torch._grouped_mm(perm_x.to(torch.bfloat16),
+                                   self.gup.transpose(1, 2).contiguous().to(torch.bfloat16),
+                                   offs=offs)
+            act = (F.silu(gu[:, :EI].float()) * gu[:, EI:].float()).bfloat16()
+            out_slots = torch._grouped_mm(
+                act, self.down.transpose(1, 2).contiguous().to(torch.bfloat16),
+                offs=offs).float()
+        w_slots = w.reshape(-1, 1)[order]
+        out_flat = torch.zeros_like(x_flat)
+        out_flat.index_add_(0, tok_sorted, out_slots * w_slots)
+        return out_flat.view(B, T, H)
+
     def forward(self, hidden, ids, mask):
         # hidden: [B,T,H] student pre-final-norm residual at t; ids: [B,T] tokens x[t]
         # draft at position t consumes follow token x[t+1] -> predicts x[t+2]
@@ -101,34 +147,7 @@ class MTPHead(torch.nn.Module):
         # MoE: norm_topk_prob=true is engine-enforced (config.zig:338 rejects
         # false); gate rows precede up rows (cuda_mtp_bf16.zig:54).
         xn = rms(x1, self.post_ln)
-        rl = xn @ self.gate.T                                   # B,T,E
-        w, idx = rl.topk(TOPK, -1)
-        w = F.softmax(w, -1)
-        # Sort-based grouped MoE: all (token, k) slots sorted by expert id, one
-        # contiguous slice per expert, single host sync (the previous double loop
-        # forced a device->host sync per unique expert per j -> 54 s/step).
-        x_flat = xn.reshape(-1, H)
-        N = x_flat.shape[0]
-        flat_e = idx.reshape(-1)                                # N*TOPK expert ids
-        tok_idx = torch.arange(N, device=xn.device).repeat_interleave(TOPK)
-        sort_e, order = flat_e.sort()
-        tok_sorted = tok_idx[order]
-        perm_x = x_flat[tok_sorted]
-        ends = torch.bincount(sort_e, minlength=E).cumsum(0).tolist()  # ONE sync
-        out_slots = torch.zeros_like(perm_x)
-        start = 0
-        for e in range(E):
-            end = ends[e]
-            if end > start:
-                xm = perm_x[start:end]
-                g = xm @ self.gup[e, :EI].T
-                u = xm @ self.gup[e, EI:].T
-                out_slots[start:end] = (F.silu(g) * u) @ self.down[e].T
-                start = end
-        w_slots = w.reshape(-1, 1)[order]
-        out_flat = torch.zeros_like(x_flat)
-        out_flat.index_add_(0, tok_sorted, out_slots * w_slots)
-        out = out_flat.view(B, T, H)
+        out = self._moe(xn)
         sg = torch.sigmoid(xn @ self.se_gate.T)
         seg = F.silu(xn @ self.se_g.T) * (xn @ self.se_u.T)
         out = out + sg * (seg @ self.se_d.T)
@@ -194,6 +213,17 @@ def main():
     embed_w = student.get_input_embeddings().weight.detach()
     lm_w = student.lm_head.weight.detach()
     head = MTPHead(state, embed_w, lm_w, rope_tables(args.max_len))
+
+    # Boot self-check: grouped kernel must reproduce the reference loop.
+    torch.manual_seed(0)
+    _xn = torch.randn(2, 128, H, device="cuda")  # fp32 like the live path
+    with torch.no_grad():
+        _a = head._moe(_xn, reference=True).float()
+        _b = head._moe(_xn, reference=False).float()
+    _d = (_a - _b).abs().max().item()
+    _s = max(_a.abs().max().item(), 1.0)
+    print(f"MoE grouped-vs-reference maxdiff={_d:.3e} (scale {_s:.2f})", flush=True)
+    assert _d < 5e-2 * _s, "grouped_mm parity FAILED"
 
     def compose(row):
         msgs = [{"role": "user", "content": row["prompt"]}]

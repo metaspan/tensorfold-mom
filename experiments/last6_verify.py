@@ -4,11 +4,18 @@ layers 34-39 (renumbered 10-15), and the renumbered config must line up.
 Prints 'tail bytes: mismatched N missing-parent M' — the phase2 gate token is
 'mismatched 0 missing-parent 0'."""
 import json, hashlib, os, re, sys
+import torch
 from safetensors import safe_open
 
 P = "/home/derek/models/tensorfold-mom/qwen36-35b-a3b-nvfp4"
 O = "/home/derek/models/tensorfold-mom/qwen36-nested-16l-last6"
 FROZEN, TAIL, TAIL_FROM = 10, 6, 34
+
+
+def _bytes(t):
+    # bf16/fp8 scalars have no numpy representation; hash the raw storage.
+    # reshape(-1) first so 0-dim scalars (A_log etc.) can be re-viewed as bytes.
+    return t.detach().cpu().contiguous().reshape(-1).view(torch.uint8).numpy().tobytes()
 
 
 def load(d):
@@ -36,8 +43,8 @@ def main() -> int:
                     miss += 1
                     continue
                 with safe_open(os.path.join(P, po[psrc]), framework="pt") as gp:
-                    a = gp.get_tensor(psrc).numpy().tobytes()
-                b = g.get_tensor(n).numpy().tobytes()
+                    a = _bytes(gp.get_tensor(psrc))
+                b = _bytes(g.get_tensor(n))
                 if hashlib.sha256(a).digest() != hashlib.sha256(b).digest():
                     bad += 1
     print(f"tail bytes: mismatched {bad} missing-parent {miss} (checked {seen})")

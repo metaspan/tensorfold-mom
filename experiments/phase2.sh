@@ -17,24 +17,33 @@ trap 'kill $HB 2>/dev/null' EXIT
 st(){ echo "[$(date +%H:%M:%S)] $*" >> /tmp/phase2.status; }
 
 # ---- P0: last6 byte-for-byte verification (5e pre-registration) ----
-timeout 1800 $PY last6_verify.py > /tmp/last6-verify.out 2>&1; P0RC=$?
-P0OK=0
-grep -qa "mismatched 0 missing-parent 0" /tmp/last6-verify.out && P0OK=1
-st "P0 verify rc=$P0RC ok=$P0OK :: $(grep -a 'tail bytes' /tmp/last6-verify.out | tail -1 | cut -c1-120)"
+if grep -qa "mismatched 0 missing-parent 0" /tmp/last6-verify.out 2>/dev/null; then
+  P0OK=1; st "P0 SKIP (already verified clean)"
+else
+  timeout 1800 $PY last6_verify.py > /tmp/last6-verify.out 2>&1; P0RC=$?
+  P0OK=0
+  grep -qa "mismatched 0 missing-parent 0" /tmp/last6-verify.out && P0OK=1
+  st "P0 verify rc=$P0RC ok=$P0OK :: $(grep -a 'tail bytes' /tmp/last6-verify.out | tail -1 | cut -c1-120)"
+fi
 
 # ---- P1: native coherence gate on last6 (bar 10/12 pre-registered) ----
 if [ "$P0OK" = 1 ]; then
-  timeout 1500 $PY distill_gate.py --engine native --model $MODELS/qwen36-nested-16l-last6 \
-      > /tmp/last6-gate.out 2>&1; RC=$?
-  st "P1 last6 gate rc=$RC :: $(grep -a 'GATE ' /tmp/last6-gate.out | tail -1 | cut -c1-120)"
+  if grep -qa "^GATE " /tmp/last6-gate.out 2>/dev/null; then
+    st "P1 SKIP (gate already run): $(grep -a 'GATE ' /tmp/last6-gate.out | tail -1 | cut -c1-120)"
+  else
+    timeout 1500 $PY distill_gate.py --engine native --model $MODELS/qwen36-nested-16l-last6 \
+        > /tmp/last6-gate.out 2>&1; RC=$?
+    st "P1 last6 gate rc=$RC :: $(grep -a 'GATE ' /tmp/last6-gate.out | tail -1 | cut -c1-120)"
+  fi
 else
   st "P1 SKIPPED (P0 not clean)"
 fi
 
-# ---- P2: MTP head on t3 with vectorized MoE (fresh dir) ----
+# ---- P2: MTP head on t3 with grouped-kernel MoE (fresh dir) ----
 rm -rf $MODELS/mtphead-t3
 timeout 21600 $PY mtp_train.py --student $MODELS/qwen36-nested-16l-t3 \
     --data results/distill/rollouts-10k-clean.jsonl \
+    --batch-size 16 \
     --out-dir $MODELS/mtphead-t3 \
     > /tmp/mtphead-t3.out 2>&1
 st "P2 mtphead-t3 train rc=$? (tail: $(tail -2 /tmp/mtphead-t3.out | tr '\n' ' ' | cut -c1-160))"
