@@ -1,0 +1,13 @@
+# KD stack pins (2026-11-14). kernels==0.12.3 + huggingface-hub<2 is the only combo where transformers 5.8.1 hub_kernels imports AND FP8 kernels load; kernels>=0.18 drags hub 2.x and breaks tokenizers/transformers (rediscovered the hard way twice). causal_conv1d must NOT be installed; fla 0.6.0 is required.
+accelerate==1.15.0
+fla-core==0.6.0
+flash-linear-attention==0.6.0
+huggingface_hub==1.33.0
+kernels==0.12.3
+numpy==2.3.5
+safetensors==0.7.0
+tokenizers==0.22.2
+torch==2.11.0
+torchvision==0.26.0
+transformers==5.8.1
+triton==3.6.0

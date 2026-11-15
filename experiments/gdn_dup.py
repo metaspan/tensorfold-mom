@@ -57,9 +57,11 @@ NP_DT = {"BF16": np.uint16, "F8_E4M3": np.uint8, "F32": np.float32}  # raw bytes
 
 
 def dup_heads(arr: np.ndarray) -> np.ndarray:
-    """[16, ...] -> [32, ...]: block layout, second half equals first."""
-    if arr.shape[0] != 16:
-        raise ValueError(f"expected 16 heads, got {arr.shape}")
+    """head-leading [16, ...] OR a contiguous head row-block [16*128, ...] -> [32, ...] / [32*128, ...]:
+    block layout, second half equals first (heads are contiguous 128-row blocks, so doubling the
+    whole row block duplicates head j -> j+16, matching the engine's [16, ...] head layout)."""
+    if arr.shape[0] not in (16, 16 * 128):
+        raise ValueError(f"expected 16 heads (leading dim 16 or a 16*128 row block), got {arr.shape}")
     return np.concatenate([arr, arr], axis=0)
 
 
@@ -140,8 +142,9 @@ def selftest() -> int:
     g32 = expand(g16)
     assert_shapes(g32, "selftest: ")
     # de-dup round trip: collapse second half away -> original bytes
+    # (head-leading [16,...] and row-block [16*128,...] tensors differ; slice by the ORIGINAL rows)
     for name in ("A_log", "dt_bias", "in_proj_a.weight", "in_proj_b.weight", "in_proj_z.weight"):
-        assert np.array_equal(g32[name][:16 if g32[name].ndim == 1 else 2048], g16[name])
+        assert np.array_equal(g32[name][: g16[name].shape[0]], g16[name])
     assert np.array_equal(g32["out_proj.weight"][:, :2048], g16["out_proj.weight"])
     q = g32["in_proj_qkv.weight"]
     assert np.array_equal(q[:2048], g16["in_proj_qkv.weight"][:2048])
