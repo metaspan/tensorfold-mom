@@ -48,13 +48,25 @@ def parent_tensors(parent):
     return out
 
 
-def keep(name, frozen, tail):
+def keep(name, frozen, tail, tail_from=None):
     if name.startswith(DROP_PREFIXES):
         return False
     if name.startswith(LP):
         i = int(name[len(LP):].split(".", 1)[0])
-        return i < frozen + tail  # frozen prefix + warm-start tail from the parent
+        if tail_from is None or tail_from == frozen:
+            return i < frozen + tail  # frozen prefix + warm-start tail from the parent
+        return i < frozen or tail_from <= i < tail_from + tail
     return True  # embed_tokens, final norm, lm_head, rope tables
+
+
+def rename_layer(name, frozen, tail_from):
+    # parent layer index -> thin layer index (5e last-6 byte-copy: 34-39 -> 10-15)
+    if not name.startswith(LP):
+        return name
+    i = int(name[len(LP):].split(".", 1)[0])
+    if i < frozen:
+        return name
+    return f"{LP}{i - tail_from + frozen}." + ".".join(name.split(".")[4:])
 
 
 def sha_of(f, off, length, chunk=1 << 20):
@@ -77,17 +89,21 @@ def frozen_set(ts, frozen):
             (n.startswith(LP) and int(n[len(LP):].split(".", 1)[0]) >= frozen)]
 
 
-def extract(parent, out, frozen, tail):
+def extract(parent, out, frozen, tail, tail_from=None):
     ts = parent_tensors(parent)
-    names = [n for n in sorted(ts) if keep(n, frozen, tail)]
+    # 5e last-6 byte-copy: tail layers may come from a different parent range
+    # (tail_from..tail_from+tail-1) and are renumbered to frozen..frozen+tail-1.
+    names = [(rename_layer(n, frozen, tail_from) if tail_from is not None else n, n)
+             for n in sorted(ts) if keep(n, frozen, tail, tail_from)]
     os.makedirs(out, exist_ok=True)
     # plan offsets for one output shard
     offs, cur = {}, 0
-    for n in names:
-        ln = ts[n][2][2] - ts[n][2][1]
-        offs[n] = (cur, cur + ln)
+    for o, p in names:
+        ln = ts[p][2][2] - ts[p][2][1]
+        offs[o] = (cur, cur + ln)
         cur += ln
-    hdr = {n: {"dtype": ts[n][0], "shape": ts[n][1], "data_offsets": list(offs[n])} for n in names}
+    hdr = {o: {"dtype": ts[p][0], "shape": ts[p][1],
+               "data_offsets": list(offs[o])} for o, p in names}
     hb = json.dumps(hdr, separators=(",", ":")).encode()
     pad = (-len(hb) - 8) % 8
     hb += b" " * pad
@@ -95,8 +111,8 @@ def extract(parent, out, frozen, tail):
         w.write(struct.pack("<Q", len(hb)))
         w.write(hb)
         srcs = {}
-        for n in names:
-            fn, a, b = ts[n][2]
+        for o, p in names:
+            fn, a, b = ts[p][2]
             f = srcs.setdefault(fn, open(os.path.join(parent, fn), "rb"))
             f.seek(a)
             left = b - a
@@ -115,14 +131,31 @@ def extract(parent, out, frozen, tail):
     tc = cfg.get("text_config", cfg)
     tc["num_hidden_layers"] = frozen + tail
     if isinstance(tc.get("layer_types"), list):
-        tc["layer_types"] = tc["layer_types"][: frozen + tail]
+        lt = tc["layer_types"]
+        if tail_from is not None and tail_from != frozen:
+            tc["layer_types"] = lt[:frozen] + lt[tail_from:tail_from + tail]
+        else:
+            tc["layer_types"] = lt[: frozen + tail]
     qc = tc.get("quantization_config") or cfg.get("quantization_config")
     if qc and isinstance(qc.get("quantized_layers"), dict):
         import re as _re
-        dead = _re.compile(r"^model\.language_model\.layers\.(" +
-                           "|".join(str(i) for i in range(frozen + tail, 10_000)) + r")\.")
-        for k in [k for k in qc["quantized_layers"] if dead.match(k)]:
-            del qc["quantized_layers"][k]
+        # rebuild the per-layer quant table: keep 0..frozen-1 as-is, RENAME
+        # tail_from..tail_from+tail-1 -> frozen..frozen+tail-1, drop the rest.
+        new_q = {}
+        for k, v in qc["quantized_layers"].items():
+            m = _re.match(r"^model\.language_model\.layers\.(\d+)\.", k)
+            if not m:
+                new_q[k] = v
+                continue
+            L = int(m.group(1))
+            if L < frozen:
+                new_q[k] = v
+            elif tail_from is not None and tail_from <= L < tail_from + tail:
+                new_q[k.replace(f".layers.{L}.",
+                                f".layers.{L - tail_from + frozen}.", 1)] = v
+            elif tail_from is None and L < frozen + tail:
+                new_q[k] = v
+        qc["quantized_layers"] = new_q
     cfg.pop("num_hidden_layers", None)  # remove the earlier dead top-level write
     cfg["nested_frozen_layers"] = frozen
     cfg["nested_parent"] = os.path.basename(parent.rstrip("/"))
@@ -209,7 +242,14 @@ if __name__ == "__main__":
     ap.add_argument("--out", required=True)
     ap.add_argument("--frozen", type=int, default=10)
     ap.add_argument("--tail", type=int, default=6)
+    ap.add_argument("--tail-from", type=int, default=None,
+                    help="copy tail layers from parent range tail-from..+tail-1, "
+                         "renumbered into the tail slot (5e last-6 byte-copy)")
+    ap.add_argument("--force", action="store_true", help="overwrite existing out dir")
     ap.add_argument("--verify", action="store_true")
     a = ap.parse_args()
-    sys.exit(verify(a.parent, a.out, a.frozen) if a.verify
-             else extract(a.parent, a.out, a.frozen, a.tail))
+    if a.verify:
+        sys.exit(verify(a.parent, a.out, a.frozen))
+    if os.path.isdir(a.out) and not a.force:
+        sys.exit(f"{a.out} exists; --force to overwrite")
+    sys.exit(extract(a.parent, a.out, a.frozen, a.tail, a.tail_from))

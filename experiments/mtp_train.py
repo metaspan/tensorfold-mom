@@ -104,21 +104,31 @@ class MTPHead(torch.nn.Module):
         rl = xn @ self.gate.T                                   # B,T,E
         w, idx = rl.topk(TOPK, -1)
         w = F.softmax(w, -1)
-        out = torch.zeros_like(x1)
-        xnf = xn
-        for j in range(TOPK):
-            e_flat = idx[..., j].reshape(-1)                      # N token slots -> expert id
-            x_flat = xnf.reshape(-1, H)
-            slot = torch.zeros_like(x_flat)
-            ue, inv = torch.unique(e_flat, return_inverse=True)
-            for k in range(ue.numel()):
-                e_id = int(ue[k])
-                m = (inv == k).nonzero().squeeze(1)
-                xm = x_flat[m]
-                g = xm @ self.gup[e_id, :EI].T
-                u = xm @ self.gup[e_id, EI:].T
-                slot[m] = (F.silu(g) * u) @ self.down[e_id].T     # N,H
-            out = out + (slot * w[..., j].reshape(-1, 1)).view(B, T, H)
+        # Sort-based grouped MoE: all (token, k) slots sorted by expert id, one
+        # contiguous slice per expert, single host sync (the previous double loop
+        # forced a device->host sync per unique expert per j -> 54 s/step).
+        x_flat = xn.reshape(-1, H)
+        N = x_flat.shape[0]
+        flat_e = idx.reshape(-1)                                # N*TOPK expert ids
+        tok_idx = torch.arange(N, device=xn.device).repeat_interleave(TOPK)
+        sort_e, order = flat_e.sort()
+        tok_sorted = tok_idx[order]
+        perm_x = x_flat[tok_sorted]
+        ends = torch.bincount(sort_e, minlength=E).cumsum(0).tolist()  # ONE sync
+        out_slots = torch.zeros_like(perm_x)
+        start = 0
+        for e in range(E):
+            end = ends[e]
+            if end > start:
+                xm = perm_x[start:end]
+                g = xm @ self.gup[e, :EI].T
+                u = xm @ self.gup[e, EI:].T
+                out_slots[start:end] = (F.silu(g) * u) @ self.down[e].T
+                start = end
+        w_slots = w.reshape(-1, 1)[order]
+        out_flat = torch.zeros_like(x_flat)
+        out_flat.index_add_(0, tok_sorted, out_slots * w_slots)
+        out = out_flat.view(B, T, H)
         sg = torch.sigmoid(xn @ self.se_gate.T)
         seg = F.silu(xn @ self.se_g.T) * (xn @ self.se_u.T)
         out = out + sg * (seg @ self.se_d.T)
