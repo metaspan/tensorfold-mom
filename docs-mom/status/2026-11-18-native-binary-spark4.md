@@ -25,8 +25,9 @@ Verify sha256 against the value listed in ~/sp4-transfer/sha256sums.txt after un
 Repo: metaspan/tensorfold-mom, branch mom/main (you already have mom-repo clone).
 
     # zig 0.17.0 (exact version required — 0.18/0.19 will break on removed preview APIs)
-    curl -LO https://ziglang.org/download/0.17.0/zig-linux-aarch64-0.17.0.tar.xz
-    tar -xf zig-linux-aarch64-0.17.0.tar.xz && export PATH=$PWD/zig-linux-aarch64-0.17.0:$PATH
+    curl -LO https://ziglang.org/download/0.17.0/zig-aarch64-linux-0.17.0.tar.xz
+    echo "9e8d11661d4ae3bd57702a3832781e23ad151dde5798e16a5ccd503f65234ff8  zig-aarch64-linux-0.17.0.tar.xz" | sha256sum -c
+    tar -xf zig-aarch64-linux-0.17.0.tar.xz && export PATH=$PWD/zig-aarch64-linux-0.17.0:$PATH
     zig version   # must print 0.17.0
 
     # nvcc required (PATH or /usr/local/cuda/bin). DGX Spark images ship it; else apt nvidia-cuda-toolkit.
