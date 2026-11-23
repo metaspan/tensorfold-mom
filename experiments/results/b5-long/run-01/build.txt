@@ -1,0 +1,4 @@
+binary: ./zig-out/native/bin/tensorfold-native
+tensorfold-native 1.2.7
+31fa27dcb2d4dbfa822061b4e898f111b243b86613eff94c27862d78bb002e5b  ./zig-out/native/bin/tensorfold-native
+repo HEAD: bd0304ccd79192c9c1aa74a215d6b291bdb6bacf

@@ -1,0 +1,3 @@
+trivial: /home/derek/.hermes/models/tensorfold-mom/qwen35-2b (mlx-community/Qwen3.5-2B-MLX-4bit @93760be4)
+heavy: /home/derek/.hermes/models/tensorfold-mom/qwen36-35b-a3b-nvfp4 (nvidia/Qwen3.6-35B-A3B-NVFP4 @1355db6a)
+tokenizer consistency: same chat template + vocab (docs/12 tokenizer-consistency finding)
