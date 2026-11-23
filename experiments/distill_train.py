@@ -71,6 +71,10 @@ def main() -> int:
     ap.add_argument("--beta", type=float, default=0.5,
                     help="KD weight: loss = (1-beta)*CE + beta*kd_T^2*KL")
     ap.add_argument("--kd-temp", type=float, default=1.0)
+    ap.add_argument("--save-checkpoints", action="store_true",
+                    help="save an HF-loadable checkpoint per epoch at "
+                         "<out-dir>-ep<N> + an eval ledger <out-dir>-epochs.json "
+                         "(5g adoption: gate each, keep the highest-step passing)")
     args = ap.parse_args()
     dev = "cuda" if torch.cuda.is_available() else "cpu"
     kd_rows = torch.load(args.kd, weights_only=True) if args.kd else None
@@ -156,6 +160,45 @@ def main() -> int:
         kl = (t_logp.exp() * (t_logp - s_logp)).sum(-1).mean()
         return (1.0 - beta) * ce + beta * (T * T) * kl
 
+    os.makedirs(args.out_dir, exist_ok=True)
+    # Stream-save tensor-by-tensor: save_pretrained's single 27 GiB shard materialized
+    # the whole file in CPU RAM and tripped the worker-scope cgroup OOM (SIGKILL 143).
+    # safetensors.torch.save_file still buffers one shard, so write small per-group shards
+    # plus an index, keeping anon RSS bounded.
+    import re as _re
+    from safetensors.torch import save_file as _save_file
+
+    def save_student(out_dir):
+        os.makedirs(out_dir, exist_ok=True)
+        sd = model.state_dict()  # references only; CPU copies happen one group at a time
+        groups: dict = {}
+        for k in sd:
+            m = _re.search(r"layers\.(\d+)\.", k)
+            groups.setdefault(m.group(1) if m else "rest", []).append(k)
+        total = sum(t.numel() * t.element_size() for t in sd.values())
+        index = {"metadata": {"total_size": total}, "weight_map": {}}
+        for gi, (gname, keys) in enumerate(sorted(groups.items())):
+            shard = {k: sd[k].detach().cpu().contiguous() for k in keys}
+            fname = f"model-{gi:05d}-of-{len(groups):05d}.safetensors"
+            _save_file(shard, os.path.join(out_dir, fname), metadata={"format": "pt"})
+            for k in keys:
+                index["weight_map"][k] = fname
+            del shard
+            print(f"saved {fname} ({len(keys)} tensors)", flush=True)
+        json.dump(index, open(os.path.join(out_dir, "model.safetensors.index.json"), "w"))
+        # NOTE: ship the config the model was LOADED with (bf16 twin's, HF-loadable —
+        # the twin control gated on it fine). The native CUDA engine refuses plain
+        # bf16 MoE regardless of config form (cuda_geometry.zig:290); do not swap in
+        # VL/NVFP4 configs — that only broke boots (t1 saga 2026-11-13).
+        model.config.save_pretrained(out_dir)
+        tok.save_pretrained(out_dir)
+        # record provenance so M3 can gate on the frozen digest staying unchanged
+        meta = {"frozen_layers": FROZEN_LAYERS, "trainable": len(trainable),
+                "data": os.path.abspath(args.data), "epochs": args.epochs, "lr": args.lr}
+        json.dump(meta, open(os.path.join(out_dir, "DISTILL.json"), "w"), indent=1)
+        print(f"student tail saved -> {out_dir}", flush=True)
+
+    epoch_ledger = []
     for ep in range(args.epochs):
         tot_loss, n = 0.0, 0
         for msgs, comp, kd in train_rows:
@@ -169,47 +212,25 @@ def main() -> int:
             opt.step()
             tot_loss += loss.item(); n += 1
         line = f"epoch {ep+1}: train loss {tot_loss/max(n,1):.4f} over {n} rows"
+        eval_loss = None
         if eval_rows:
             with torch.no_grad():
                 ev = [ce_on(m, c).item() for m, c, _ in eval_rows]
             ev = [v for v in ev if v == v]  # drop nan evals
-            line += f"; eval loss {sum(ev)/max(len(ev),1):.4f} over {len(ev)} rows"
-        print(line)
+            eval_loss = sum(ev)/max(len(ev),1)
+            line += f"; eval loss {eval_loss:.4f} over {len(ev)} rows"
+        print(line, flush=True)
+        epoch_ledger.append({"epoch": ep + 1,
+                             "train_loss": tot_loss/max(n, 1),
+                             "eval_loss": eval_loss})
+        # 5g retrain rule (2026-11-23): adopt the ACCEPTED step, not the
+        # plateau end -- checkpoint every epoch so the coherence gate can
+        # pick the highest-step passing checkpoint.
+        if args.save_checkpoints:
+            save_student(f"{args.out_dir}-ep{ep+1}")
+        json.dump(epoch_ledger, open(args.out_dir + "-epochs.json", "w"), indent=1)
 
-    os.makedirs(args.out_dir, exist_ok=True)
-    # Stream-save tensor-by-tensor: save_pretrained's single 27 GiB shard materialized
-    # the whole file in CPU RAM and tripped the worker-scope cgroup OOM (SIGKILL 143).
-    # safetensors.torch.save_file still buffers one shard, so write small per-group shards
-    # plus an index, keeping anon RSS bounded.
-    import re as _re
-    from safetensors.torch import save_file as _save_file
-    sd = model.state_dict()  # references only; CPU copies happen one group at a time
-    groups: dict = {}
-    for k in sd:
-        m = _re.search(r"layers\.(\d+)\.", k)
-        groups.setdefault(m.group(1) if m else "rest", []).append(k)
-    total = sum(t.numel() * t.element_size() for t in sd.values())
-    index = {"metadata": {"total_size": total}, "weight_map": {}}
-    for gi, (gname, keys) in enumerate(sorted(groups.items())):
-        shard = {k: sd[k].detach().cpu().contiguous() for k in keys}
-        fname = f"model-{gi:05d}-of-{len(groups):05d}.safetensors"
-        _save_file(shard, os.path.join(args.out_dir, fname), metadata={"format": "pt"})
-        for k in keys:
-            index["weight_map"][k] = fname
-        del shard
-        print(f"saved {fname} ({len(keys)} tensors)")
-    json.dump(index, open(os.path.join(args.out_dir, "model.safetensors.index.json"), "w"))
-    # NOTE: ship the config the model was LOADED with (bf16 twin's, HF-loadable —
-    # the twin control gated on it fine). The native CUDA engine refuses plain
-    # bf16 MoE regardless of config form (cuda_geometry.zig:290); do not swap in
-    # VL/NVFP4 configs — that only broke boots (t1 saga 2026-11-13).
-    model.config.save_pretrained(args.out_dir)
-    tok.save_pretrained(args.out_dir)
-    # record provenance so M3 can gate on the frozen digest staying unchanged
-    meta = {"frozen_layers": FROZEN_LAYERS, "trainable": len(trainable),
-            "data": os.path.abspath(args.data), "epochs": args.epochs, "lr": args.lr}
-    json.dump(meta, open(os.path.join(args.out_dir, "DISTILL.json"), "w"), indent=1)
-    print(f"student tail saved -> {args.out_dir}")
+    save_student(args.out_dir)
     print("NEXT: verify frozen layers still byte-match the parent via "
           "nested_extract.py --verify on the rebuilt dir before M3.")
     return 0
