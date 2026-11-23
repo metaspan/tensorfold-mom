@@ -1,0 +1,21 @@
+date: 2026-11-23T15:35:06Z
+cmd: python3 tests/mom/test_cache.py
+
+qwen35-2b vocab 248044 merges 247587
+qwen36-35b-a3b-nvfp4 vocab 248044 merges 247587
+
+device run (23 Nov, full 10 checks):
+# P2 — MVP cache config adopted (23 Nov 2026)
+
+## What was adopted
+MVP = lane-local request-starts prompt caching on BOTH lanes
+(`TF_QWEN_REQUEST_STARTS=1`) + exact re-prefill on lane switch. No
+cross-checkpoint shared cache (S1 run 3 NO-GO stands).
+- Canonical invocation: `experiments/mom_mvp_serve.sh` (boots both lanes,
+  asserts the cache-mode registration line, fails closed otherwise).
+- Regression: `tests/mom/test_cache.py` — 10 checks, all PASS on device
+  (23 Nov): tokenizer identity, cache-mode registration, warm same-lane
+  prefill-saved 96.5% (2B) / 96.7% (35B) with all reuse turns hit,
+  cross-lane first-turn full prefill (resumed at 0, both directions).
+- docs/12 addendum records the adoption + measured numbers; README journey
+  table extended.

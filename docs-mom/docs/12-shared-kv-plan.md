@@ -1,5 +1,21 @@
 # Item 6 — shared KV / translated cache: status and S1 plan
 
+**MVP adoption addendum (23 Nov 2026, shared-cache plan P0-P2).** No shared
+cache between independent checkpoints (S1 run 3 NO-GO below stands): the MVP
+is **lane-local caching only + exact re-prefill on lane switch** — i.e.
+`TF_QWEN_REQUEST_STARTS=1` on both lanes (the family's request-starts cache
+mode; docs/09), nothing shared per-request across lanes. Canonical
+invocation: `experiments/mom_mvp_serve.sh`; regression:
+`tests/mom/test_cache.py` (tokenizer-identity precondition, per-lane warm
+reuse, cross-lane full prefill). Measured on this host: warm same-lane reuse
+100%/100%, prefill saved 99.0%/99.0%, warm TTFT p50 9.8 ms (2B) / 27.4 ms
+(35B) (`docs-mom/gates/20261123-spike2-rerun.md`); exact re-prefill at
+escalation p90 3.3 s for multi-k-block deltas, ~489 ms at 2k tokens
+(`docs-mom/gates/20261124-b5-long.md`). The earlier spike-2 line "shared
+cache is dead" is amended: the same-lane miss was the default cache mode
+(opt-out), not a property of MoM (`docs-mom/status/20261123-p0-spike-hygiene.md`).
+Approximate handoff (P4) is gated behind that bar failing and Derek's call.
+
 **Status: not implemented.** Everything proven so far (docs/09, B5) is
 lane-local caching. What IS shared today: one process, one endpoint, one
 tokenizer (guard-verified), one global memory ledger, per-lane sleep/wake.

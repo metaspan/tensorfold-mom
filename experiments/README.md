@@ -53,6 +53,20 @@ Gate criterion (pre-registered): mean top-1 ≥ 0.99 on disjoint eval. Measured
 | **Coherence gate** | `distill_gate.py` + `gate_qa.json` | PRE-REGISTERED: ≥10/12 disjoint QA items, zero template-token leakage; thresholds fixed before training (S1 lesson) | `python distill_gate.py --model <dir>` |
 | Full window | `run_distill2.sh` | chain of the three, freshness + port-band guards | `systemd-run --user --scope -p MemoryMax=100G bash experiments/run_distill2.sh` |
 
+## Shared-cache MVP (docs/12 addendum; plan P0-P2, 23 Nov 2026)
+
+| Gate | Script | Criterion | Run |
+|---|---|---|---|
+| B5 cache effectiveness | `b5_cache_probe.py` | 28-turn alternating conversation, cold+warm in one process; arm B (opt-in) warm same-lane reuse >= 99% both lanes; arm A (default env) reuse == 0% (reproduces spike 2) | `python3 experiments/b5_cache_probe.py 28 --arm B` / `--arm A` |
+| B5-long escalation cost | `b5_long_probe.py` | heavy delta-prefill p90 < 500 ms AND < 15% of escalation e2e over L in {512..32k} (P4-eligibility bar) | `TFM_CONTEXT=32768 python3 experiments/b5_long_probe.py` |
+| MVP serving invocation | `mom_mvp_serve.sh` | boots both lanes; fails closed unless `TF_QWEN_REQUEST_STARTS=1` is registered + routing over 2 lanes | `bash experiments/mom_mvp_serve.sh` |
+| MVP cache regression | `../tests/mom/test_cache.py` | 10 checks: tokenizer identity (normalized merges — the two checkpoints store them differently), cache-mode registration, warm same-lane reuse (prefill saved >= 90%), cross-lane switch = full prefill | `python3 tests/mom/test_cache.py` (TFM_PORT default 8219) |
+
+Device notes: `mom-serve --parallel 2` fails on this build/GB10 at any
+context >= 4k (`CUDA_ERROR_ILLEGAL_ADDRESS`, cannot reserve 2 streams'
+caches) — all four use `--parallel 1` with both lanes resident. 32k context
+boots fine at parallel 1.
+
 ## Retired
 
 `hf_rec_reference.py` — HF GDN third reference: both naive and `fla` kernel
