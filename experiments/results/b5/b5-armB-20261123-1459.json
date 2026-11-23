@@ -1,0 +1,669 @@
+{
+ "arm": "B",
+ "turns": 28,
+ "context": "4096",
+ "cold": [
+  {
+   "turn": 0,
+   "lane": "qwen3.5-2b",
+   "ttft_s": 0.0237,
+   "e2e_s": 0.0361,
+   "completion_tokens": 3,
+   "prompt_tokens": 31,
+   "content": "49",
+   "resumed_at": 0,
+   "kept": 2
+  },
+  {
+   "turn": 1,
+   "lane": "qwen3.6-35b",
+   "ttft_s": 0.1434,
+   "e2e_s": 0.494,
+   "completion_tokens": 24,
+   "prompt_tokens": 69,
+   "content": "Here is a Python solution using the `icalendar` library, which is the standard for parsing iCalendar files.\n\n",
+   "resumed_at": 0,
+   "kept": 2
+  },
+  {
+   "turn": 2,
+   "lane": "qwen3.5-2b",
+   "ttft_s": 0.0358,
+   "e2e_s": 0.0605,
+   "completion_tokens": 5,
+   "prompt_tokens": 112,
+   "content": "100\u00b0C",
+   "resumed_at": 24,
+   "kept": 1
+  },
+  {
+   "turn": 3,
+   "lane": "qwen3.6-35b",
+   "ttft_s": 0.1343,
+   "e2e_s": 0.4849,
+   "completion_tokens": 24,
+   "prompt_tokens": 149,
+   "content": "### Optimistic vs. Pessimistic Concurrency Control\n\n**1. Optimistic Concurrency Control (OCC)**",
+   "resumed_at": 62,
+   "kept": 1
+  },
+  {
+   "turn": 4,
+   "lane": "qwen3.5-2b",
+   "ttft_s": 0.0368,
+   "e2e_s": 0.173,
+   "completion_tokens": 24,
+   "prompt_tokens": 189,
+   "content": "The three primary colors are **Red, Blue, and Yellow**.\n\nThese colors are defined by the **RYB (",
+   "resumed_at": 105,
+   "kept": 1
+  },
+  {
+   "turn": 5,
+   "lane": "qwen3.6-35b",
+   "ttft_s": 0.1436,
+   "e2e_s": 0.5132,
+   "completion_tokens": 24,
+   "prompt_tokens": 257,
+   "content": "Here is a robust schema design for a multi-tenant Todo App, addressing shared projects, soft deletes, indexing, and",
+   "resumed_at": 142,
+   "kept": 1
+  },
+  {
+   "turn": 6,
+   "lane": "qwen3.5-2b",
+   "ttft_s": 0.0376,
+   "e2e_s": 0.1746,
+   "completion_tokens": 24,
+   "prompt_tokens": 300,
+   "content": "A leap year has **366 days**.\n\nThis occurs because a standard year is 365 days.",
+   "resumed_at": 182,
+   "kept": 1
+  },
+  {
+   "turn": 7,
+   "lane": "qwen3.6-35b",
+   "ttft_s": 0.1443,
+   "e2e_s": 0.4963,
+   "completion_tokens": 24,
+   "prompt_tokens": 368,
+   "content": "### 1. B+ Tree Range Scan Mechanics\n\nA B+ tree is designed specifically for efficient range scans. Unlike",
+   "resumed_at": 250,
+   "kept": 1
+  },
+  {
+   "turn": 8,
+   "lane": "qwen3.5-2b",
+   "ttft_s": 0.0383,
+   "e2e_s": 0.1749,
+   "completion_tokens": 24,
+   "prompt_tokens": 411,
+   "content": "The planet known as the \"Red Planet\" is **Mars**.\n\nThis nickname comes from the iron oxide (rust",
+   "resumed_at": 293,
+   "kept": 1
+  },
+  {
+   "turn": 9,
+   "lane": "qwen3.6-35b",
+   "ttft_s": 0.1479,
+   "e2e_s": 0.5249,
+   "completion_tokens": 24,
+   "prompt_tokens": 478,
+   "content": "Here are the four most likely causes for a p99 latency spike while p50 remains stable, ordered by probability",
+   "resumed_at": 361,
+   "kept": 1
+  },
+  {
+   "turn": 10,
+   "lane": "qwen3.5-2b",
+   "ttft_s": 0.0383,
+   "e2e_s": 0.1739,
+   "completion_tokens": 24,
+   "prompt_tokens": 521,
+   "content": "**2.48 miles**\n\n*(Note: 1 km \u2248 0.621371",
+   "resumed_at": 404,
+   "kept": 1
+  },
+  {
+   "turn": 11,
+   "lane": "qwen3.6-35b",
+   "ttft_s": 0.1485,
+   "e2e_s": 0.5158,
+   "completion_tokens": 24,
+   "prompt_tokens": 583,
+   "content": "### Comparison: TCP BBR vs. CUBIC on a Lossy Satellite Link\n\n**1. CUBIC",
+   "resumed_at": 471,
+   "kept": 1
+  },
+  {
+   "turn": 12,
+   "lane": "qwen3.5-2b",
+   "ttft_s": 0.0383,
+   "e2e_s": 0.1743,
+   "completion_tokens": 24,
+   "prompt_tokens": 623,
+   "content": "**William Shakespeare**\n\nHe wrote *Romeo and Juliet* in the late 1590s,",
+   "resumed_at": 514,
+   "kept": 1
+  },
+  {
+   "turn": 13,
+   "lane": "qwen3.6-35b",
+   "ttft_s": 0.147,
+   "e2e_s": 0.5031,
+   "completion_tokens": 24,
+   "prompt_tokens": 686,
+   "content": "Here is the SQL query using `DENSE_RANK()` to handle ties correctly, followed by an explanation.\n\n### SQL",
+   "resumed_at": 576,
+   "kept": 1
+  },
+  {
+   "turn": 14,
+   "lane": "qwen3.5-2b",
+   "ttft_s": 0.039,
+   "e2e_s": 0.1703,
+   "completion_tokens": 24,
+   "prompt_tokens": 731,
+   "content": "The square root of 144 is **12**.\n\nSince $12 \\times 12 =",
+   "resumed_at": 616,
+   "kept": 1
+  },
+  {
+   "turn": 15,
+   "lane": "qwen3.6-35b",
+   "ttft_s": 0.1501,
+   "e2e_s": 0.5085,
+   "completion_tokens": 24,
+   "prompt_tokens": 788,
+   "content": "### How Generational GC Promotes Objects\n\nGenerational garbage collection relies on the **Weak Generational Hypothesis**:",
+   "resumed_at": 679,
+   "kept": 1
+  },
+  {
+   "turn": 16,
+   "lane": "qwen3.5-2b",
+   "ttft_s": 0.0404,
+   "e2e_s": 0.047,
+   "completion_tokens": 2,
+   "prompt_tokens": 831,
+   "content": "Yes",
+   "resumed_at": 724,
+   "kept": 1
+  },
+  {
+   "turn": 17,
+   "lane": "qwen3.6-35b",
+   "ttft_s": 0.1371,
+   "e2e_s": 0.4891,
+   "completion_tokens": 24,
+   "prompt_tokens": 870,
+   "content": "### API Contract: Webhook Delivery Service\n\nThis contract defines the interface between the **Webhook Provider** (your service",
+   "resumed_at": 781,
+   "kept": 1
+  },
+  {
+   "turn": 18,
+   "lane": "qwen3.5-2b",
+   "ttft_s": 0.0387,
+   "e2e_s": 0.1517,
+   "completion_tokens": 20,
+   "prompt_tokens": 913,
+   "content": "**German**\n\nIt is a common German greeting meaning \"thank you\" or \"thanks.\"",
+   "resumed_at": 824,
+   "kept": 1
+  },
+  {
+   "turn": 19,
+   "lane": "qwen3.6-35b",
+   "ttft_s": 0.1425,
+   "e2e_s": 0.4951,
+   "completion_tokens": 24,
+   "prompt_tokens": 966,
+   "content": "### Why Float Addition is Non-Associative\n\nFloating-point numbers (IEEE 754) have finite precision.",
+   "resumed_at": 863,
+   "kept": 1
+  },
+  {
+   "turn": 20,
+   "lane": "qwen3.5-2b",
+   "ttft_s": 0.039,
+   "e2e_s": 0.0642,
+   "completion_tokens": 5,
+   "prompt_tokens": 1007,
+   "content": "**Tokyo**",
+   "resumed_at": 906,
+   "kept": 1
+  },
+  {
+   "turn": 21,
+   "lane": "qwen3.6-35b",
+   "ttft_s": 0.137,
+   "e2e_s": 0.4892,
+   "completion_tokens": 24,
+   "prompt_tokens": 1040,
+   "content": "Here is an implementation of an LRU (Least Recently Used) Cache in Python with **O(1)** time complexity",
+   "resumed_at": 959,
+   "kept": 1
+  },
+  {
+   "turn": 22,
+   "lane": "qwen3.5-2b",
+   "ttft_s": 0.0393,
+   "e2e_s": 0.1744,
+   "completion_tokens": 24,
+   "prompt_tokens": 1080,
+   "content": "There are **7** recognized continents.\n\nThe standard classification is:\n1.  **Asia**\n2.",
+   "resumed_at": 1000,
+   "kept": 1
+  },
+  {
+   "turn": 23,
+   "lane": "qwen3.6-35b",
+   "ttft_s": 0.1477,
+   "e2e_s": 0.4995,
+   "completion_tokens": 24,
+   "prompt_tokens": 1136,
+   "content": "### The CAP Theorem\n\nThe **CAP theorem** (proposed by Eric Brewer) states that a distributed system can",
+   "resumed_at": 1033,
+   "kept": 1
+  },
+  {
+   "turn": 24,
+   "lane": "qwen3.5-2b",
+   "ttft_s": 0.0396,
+   "e2e_s": 0.1783,
+   "completion_tokens": 24,
+   "prompt_tokens": 1182,
+   "content": "**10,000**\n\nThis is calculated as $2^{10} = 102",
+   "resumed_at": 1073,
+   "kept": 1
+  },
+  {
+   "turn": 25,
+   "lane": "qwen3.6-35b",
+   "ttft_s": 0.1527,
+   "e2e_s": 0.5062,
+   "completion_tokens": 24,
+   "prompt_tokens": 1246,
+   "content": "### Recursive Descent Parser Implementation\n\nThis parser handles operator precedence by structuring the grammar:\n1.  `expression",
+   "resumed_at": 1129,
+   "kept": 1
+  },
+  {
+   "turn": 26,
+   "lane": "qwen3.5-2b",
+   "ttft_s": 0.04,
+   "e2e_s": 0.1763,
+   "completion_tokens": 24,
+   "prompt_tokens": 1289,
+   "content": "Plants primarily absorb **Carbon Dioxide (CO\u2082)** from the atmosphere.\n\nThey also absorb **Nitrogen (",
+   "resumed_at": 1175,
+   "kept": 1
+  },
+  {
+   "turn": 27,
+   "lane": "qwen3.6-35b",
+   "ttft_s": 0.1449,
+   "e2e_s": 0.5054,
+   "completion_tokens": 24,
+   "prompt_tokens": 1346,
+   "content": "### Process vs. Thread\n\n**1. Process**\n*   **Definition:** An independent program in execution with its",
+   "resumed_at": 1239,
+   "kept": 1
+  }
+ ],
+ "warm": [
+  {
+   "turn": 0,
+   "lane": "qwen3.5-2b",
+   "ttft_s": 0.0249,
+   "e2e_s": 0.0372,
+   "completion_tokens": 3,
+   "prompt_tokens": 31,
+   "content": "49",
+   "resumed_at": 0,
+   "kept": 2
+  },
+  {
+   "turn": 1,
+   "lane": "qwen3.6-35b",
+   "ttft_s": 0.1425,
+   "e2e_s": 0.4985,
+   "completion_tokens": 24,
+   "prompt_tokens": 69,
+   "content": "Here is a Python solution using the `icalendar` library, which is the standard for parsing iCalendar files.\n\n",
+   "resumed_at": 0,
+   "kept": 2
+  },
+  {
+   "turn": 2,
+   "lane": "qwen3.5-2b",
+   "ttft_s": 0.0371,
+   "e2e_s": 0.0627,
+   "completion_tokens": 5,
+   "prompt_tokens": 112,
+   "content": "100\u00b0C",
+   "resumed_at": 24,
+   "kept": 1
+  },
+  {
+   "turn": 3,
+   "lane": "qwen3.6-35b",
+   "ttft_s": 0.1351,
+   "e2e_s": 0.4863,
+   "completion_tokens": 24,
+   "prompt_tokens": 149,
+   "content": "### Optimistic vs. Pessimistic Concurrency Control\n\n**1. Optimistic Concurrency Control (OCC)**",
+   "resumed_at": 62,
+   "kept": 1
+  },
+  {
+   "turn": 4,
+   "lane": "qwen3.5-2b",
+   "ttft_s": 0.0379,
+   "e2e_s": 0.1727,
+   "completion_tokens": 24,
+   "prompt_tokens": 189,
+   "content": "The three primary colors are **Red, Blue, and Yellow**.\n\nThese colors are defined by the **RYB (",
+   "resumed_at": 105,
+   "kept": 1
+  },
+  {
+   "turn": 5,
+   "lane": "qwen3.6-35b",
+   "ttft_s": 0.1433,
+   "e2e_s": 0.5135,
+   "completion_tokens": 24,
+   "prompt_tokens": 257,
+   "content": "Here is a robust schema design for a multi-tenant Todo App, addressing shared projects, soft deletes, indexing, and",
+   "resumed_at": 142,
+   "kept": 1
+  },
+  {
+   "turn": 6,
+   "lane": "qwen3.5-2b",
+   "ttft_s": 0.0384,
+   "e2e_s": 0.1752,
+   "completion_tokens": 24,
+   "prompt_tokens": 300,
+   "content": "A leap year has **366 days**.\n\nThis occurs because a standard year is 365 days.",
+   "resumed_at": 182,
+   "kept": 1
+  },
+  {
+   "turn": 7,
+   "lane": "qwen3.6-35b",
+   "ttft_s": 0.1445,
+   "e2e_s": 0.4972,
+   "completion_tokens": 24,
+   "prompt_tokens": 368,
+   "content": "### 1. B+ Tree Range Scan Mechanics\n\nA B+ tree is designed specifically for efficient range scans. Unlike",
+   "resumed_at": 250,
+   "kept": 1
+  },
+  {
+   "turn": 8,
+   "lane": "qwen3.5-2b",
+   "ttft_s": 0.038,
+   "e2e_s": 0.1734,
+   "completion_tokens": 24,
+   "prompt_tokens": 411,
+   "content": "The planet known as the \"Red Planet\" is **Mars**.\n\nThis nickname comes from the iron oxide (rust",
+   "resumed_at": 293,
+   "kept": 1
+  },
+  {
+   "turn": 9,
+   "lane": "qwen3.6-35b",
+   "ttft_s": 0.1488,
+   "e2e_s": 0.5258,
+   "completion_tokens": 24,
+   "prompt_tokens": 478,
+   "content": "Here are the four most likely causes for a p99 latency spike while p50 remains stable, ordered by probability",
+   "resumed_at": 361,
+   "kept": 1
+  },
+  {
+   "turn": 10,
+   "lane": "qwen3.5-2b",
+   "ttft_s": 0.0392,
+   "e2e_s": 0.1736,
+   "completion_tokens": 24,
+   "prompt_tokens": 521,
+   "content": "**2.48 miles**\n\n*(Note: 1 km \u2248 0.621371",
+   "resumed_at": 404,
+   "kept": 1
+  },
+  {
+   "turn": 11,
+   "lane": "qwen3.6-35b",
+   "ttft_s": 0.1497,
+   "e2e_s": 0.5184,
+   "completion_tokens": 24,
+   "prompt_tokens": 583,
+   "content": "### Comparison: TCP BBR vs. CUBIC on a Lossy Satellite Link\n\n**1. CUBIC",
+   "resumed_at": 471,
+   "kept": 1
+  },
+  {
+   "turn": 12,
+   "lane": "qwen3.5-2b",
+   "ttft_s": 0.0387,
+   "e2e_s": 0.1754,
+   "completion_tokens": 24,
+   "prompt_tokens": 623,
+   "content": "**William Shakespeare**\n\nHe wrote *Romeo and Juliet* in the late 1590s,",
+   "resumed_at": 514,
+   "kept": 1
+  },
+  {
+   "turn": 13,
+   "lane": "qwen3.6-35b",
+   "ttft_s": 0.1457,
+   "e2e_s": 0.4976,
+   "completion_tokens": 24,
+   "prompt_tokens": 686,
+   "content": "Here is the SQL query using `DENSE_RANK()` to handle ties correctly, followed by an explanation.\n\n### SQL",
+   "resumed_at": 576,
+   "kept": 1
+  },
+  {
+   "turn": 14,
+   "lane": "qwen3.5-2b",
+   "ttft_s": 0.0373,
+   "e2e_s": 0.165,
+   "completion_tokens": 24,
+   "prompt_tokens": 731,
+   "content": "The square root of 144 is **12**.\n\nSince $12 \\times 12 =",
+   "resumed_at": 616,
+   "kept": 1
+  },
+  {
+   "turn": 15,
+   "lane": "qwen3.6-35b",
+   "ttft_s": 0.1493,
+   "e2e_s": 0.5007,
+   "completion_tokens": 24,
+   "prompt_tokens": 788,
+   "content": "### How Generational GC Promotes Objects\n\nGenerational garbage collection relies on the **Weak Generational Hypothesis**:",
+   "resumed_at": 679,
+   "kept": 1
+  },
+  {
+   "turn": 16,
+   "lane": "qwen3.5-2b",
+   "ttft_s": 0.0377,
+   "e2e_s": 0.0454,
+   "completion_tokens": 2,
+   "prompt_tokens": 831,
+   "content": "Yes",
+   "resumed_at": 724,
+   "kept": 1
+  },
+  {
+   "turn": 17,
+   "lane": "qwen3.6-35b",
+   "ttft_s": 0.1343,
+   "e2e_s": 0.4869,
+   "completion_tokens": 24,
+   "prompt_tokens": 870,
+   "content": "### API Contract: Webhook Delivery Service\n\nThis contract defines the interface between the **Webhook Provider** (your service",
+   "resumed_at": 781,
+   "kept": 1
+  },
+  {
+   "turn": 18,
+   "lane": "qwen3.5-2b",
+   "ttft_s": 0.0389,
+   "e2e_s": 0.1521,
+   "completion_tokens": 20,
+   "prompt_tokens": 913,
+   "content": "**German**\n\nIt is a common German greeting meaning \"thank you\" or \"thanks.\"",
+   "resumed_at": 824,
+   "kept": 1
+  },
+  {
+   "turn": 19,
+   "lane": "qwen3.6-35b",
+   "ttft_s": 0.1454,
+   "e2e_s": 0.4969,
+   "completion_tokens": 24,
+   "prompt_tokens": 966,
+   "content": "### Why Float Addition is Non-Associative\n\nFloating-point numbers (IEEE 754) have finite precision.",
+   "resumed_at": 863,
+   "kept": 1
+  },
+  {
+   "turn": 20,
+   "lane": "qwen3.5-2b",
+   "ttft_s": 0.0392,
+   "e2e_s": 0.0639,
+   "completion_tokens": 5,
+   "prompt_tokens": 1007,
+   "content": "**Tokyo**",
+   "resumed_at": 906,
+   "kept": 1
+  },
+  {
+   "turn": 21,
+   "lane": "qwen3.6-35b",
+   "ttft_s": 0.1391,
+   "e2e_s": 0.4913,
+   "completion_tokens": 24,
+   "prompt_tokens": 1040,
+   "content": "Here is an implementation of an LRU (Least Recently Used) Cache in Python with **O(1)** time complexity",
+   "resumed_at": 959,
+   "kept": 1
+  },
+  {
+   "turn": 22,
+   "lane": "qwen3.5-2b",
+   "ttft_s": 0.0397,
+   "e2e_s": 0.1768,
+   "completion_tokens": 24,
+   "prompt_tokens": 1080,
+   "content": "There are **7** recognized continents.\n\nThe standard classification is:\n1.  **Asia**\n2.",
+   "resumed_at": 1000,
+   "kept": 1
+  },
+  {
+   "turn": 23,
+   "lane": "qwen3.6-35b",
+   "ttft_s": 0.1473,
+   "e2e_s": 0.5017,
+   "completion_tokens": 24,
+   "prompt_tokens": 1136,
+   "content": "### The CAP Theorem\n\nThe **CAP theorem** (proposed by Eric Brewer) states that a distributed system can",
+   "resumed_at": 1033,
+   "kept": 1
+  },
+  {
+   "turn": 24,
+   "lane": "qwen3.5-2b",
+   "ttft_s": 0.04,
+   "e2e_s": 0.176,
+   "completion_tokens": 24,
+   "prompt_tokens": 1182,
+   "content": "**10,000**\n\nThis is calculated as $2^{10} = 102",
+   "resumed_at": 1073,
+   "kept": 1
+  },
+  {
+   "turn": 25,
+   "lane": "qwen3.6-35b",
+   "ttft_s": 0.1521,
+   "e2e_s": 0.5067,
+   "completion_tokens": 24,
+   "prompt_tokens": 1246,
+   "content": "### Recursive Descent Parser Implementation\n\nThis parser handles operator precedence by structuring the grammar:\n1.  `expression",
+   "resumed_at": 1129,
+   "kept": 1
+  },
+  {
+   "turn": 26,
+   "lane": "qwen3.5-2b",
+   "ttft_s": 0.0411,
+   "e2e_s": 0.1775,
+   "completion_tokens": 24,
+   "prompt_tokens": 1289,
+   "content": "Plants primarily absorb **Carbon Dioxide (CO\u2082)** from the atmosphere.\n\nThey also absorb **Nitrogen (",
+   "resumed_at": 1175,
+   "kept": 1
+  },
+  {
+   "turn": 27,
+   "lane": "qwen3.6-35b",
+   "ttft_s": 0.1439,
+   "e2e_s": 0.498,
+   "completion_tokens": 24,
+   "prompt_tokens": 1346,
+   "content": "### Process vs. Thread\n\n**1. Process**\n*   **Definition:** An independent program in execution with its",
+   "resumed_at": 1239,
+   "kept": 1
+  }
+ ],
+ "agg": {
+  "cold": {
+   "qwen3.5-2b": {
+    "n": 14,
+    "reuse_turns": 13,
+    "reuse_turns_measurable": 13,
+    "reuse_pct": 100.0,
+    "prefill_saved_pct": 85.3,
+    "ttft_p50_ms": 38.5,
+    "ttft_p95_ms": 40.1
+   },
+   "qwen3.6-35b": {
+    "n": 14,
+    "reuse_turns": 13,
+    "reuse_turns_measurable": 14,
+    "reuse_pct": 92.9,
+    "prefill_saved_pct": 85.6,
+    "ttft_p50_ms": 144.6,
+    "ttft_p95_ms": 151.0
+   }
+  },
+  "warm": {
+   "qwen3.5-2b": {
+    "n": 14,
+    "reuse_turns": 13,
+    "reuse_turns_measurable": 13,
+    "reuse_pct": 100.0,
+    "prefill_saved_pct": 85.3,
+    "ttft_p50_ms": 38.6,
+    "ttft_p95_ms": 40.4
+   },
+   "qwen3.6-35b": {
+    "n": 14,
+    "reuse_turns": 13,
+    "reuse_turns_measurable": 14,
+    "reuse_pct": 92.9,
+    "prefill_saved_pct": 85.6,
+    "ttft_p50_ms": 144.9,
+    "ttft_p95_ms": 150.5
+   }
+  }
+ },
+ "verdict": "FAIL",
+ "bar": "warm-pass same-lane reuse >= 99% on both lanes"
+}
