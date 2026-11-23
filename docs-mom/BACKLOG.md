@@ -39,8 +39,12 @@ Priorities are the reviewer's unless amended here, with the amendment reason.
 - Scope: MVP
 - Why: prompt cache is opt-in; mom-serve only warns when `TF_QWEN_REQUEST_STARTS` unset (B6). Measured: TTFT 46->11 trivial, 175->28 heavy.
 - Done when: mom-serve sets or refuses without `TF_QWEN_REQUEST_STARTS` and a B5 rerun shows ~85% cold / ~99.5% warm prefill saved; plus a startup assertion on each lane's cache mode covered by a host test (perplexity §9.1).
-- Refs: `docs-mom/docs/09`, PROGRESS B6
-- Status: check - matches B6 record exactly.
+- Refs: `docs-mom/docs/09`, PROGRESS B6, `docs-mom/gates/20261123-spike2-rerun.md`
+- Status: open (partial, 23 Nov 2026) — B5 rerun DONE (arm B: 85.3%/85.6% cold,
+  99.0%/99.0% warm prefill saved, reuse 100%); interim guard landed
+  (`experiments/mom_mvp_serve.sh` boot assertion + `tests/mom/test_cache.py`).
+  Remaining: mom-serve sets/refuses the mode in-process + per-lane startup
+  assertion covered by a host test.
 
 ### BL-5: Cross-model background warming
 - Priority: P1
